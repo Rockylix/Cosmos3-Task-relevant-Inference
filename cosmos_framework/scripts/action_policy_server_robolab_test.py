@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -94,6 +95,100 @@ def test_server_args_default_to_released_droid_serving_config() -> None:
     assert args.num_steps == 4
     assert args.shift == 5.0
     assert args.deterministic_seed is False
+    assert args.guardrails is True
+    assert args.offload_guardrail_models is False
+    assert args.hidden_state_capture_dir is None
+    assert args.hidden_state_capture_chunks == []
+    assert args.hidden_state_capture_disk_reserve_gib == 10.0
+    assert args.rope_qk_capture_dir is None
+    assert args.rope_qk_capture_chunks == []
+    assert args.rope_qk_capture_steps == [0, 3]
+    assert args.rope_qk_capture_blocks == [0, 10, 20, 27]
+    assert args.rope_qk_capture_branches == ["conditional"]
+    assert args.rope_qk_capture_disk_reserve_gib == 2.0
+
+
+def test_hidden_state_capture_args_require_compatible_pair_and_sampler(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="must be set together"):
+        robolab_server.RobolabServerArgs(hidden_state_capture_dir=tmp_path)
+    with pytest.raises(ValueError, match="non-negative"):
+        robolab_server.RobolabServerArgs(
+            hidden_state_capture_dir=tmp_path,
+            hidden_state_capture_chunks=[-1],
+        )
+    with pytest.raises(ValueError, match="num-steps 4"):
+        robolab_server.RobolabServerArgs(
+            hidden_state_capture_dir=tmp_path,
+            hidden_state_capture_chunks=[3],
+            num_steps=3,
+        )
+    with pytest.raises(ValueError, match="CFG guidance"):
+        robolab_server.RobolabServerArgs(
+            hidden_state_capture_dir=tmp_path,
+            hidden_state_capture_chunks=[3],
+            guidance=1.0,
+        )
+
+
+def test_rope_qk_capture_args_validate_selection(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="must be set together"):
+        robolab_server.RobolabServerArgs(rope_qk_capture_dir=tmp_path)
+    with pytest.raises(ValueError, match="must be in"):
+        robolab_server.RobolabServerArgs(
+            rope_qk_capture_dir=tmp_path,
+            rope_qk_capture_chunks=[5],
+            rope_qk_capture_steps=[0, 4],
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        robolab_server.RobolabServerArgs(
+            hidden_state_capture_dir=tmp_path / "hidden",
+            hidden_state_capture_chunks=[5],
+            rope_qk_capture_dir=tmp_path / "rope",
+            rope_qk_capture_chunks=[5],
+        )
+
+
+def test_build_setup_args_propagates_guardrail_options(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+    setup_args = SimpleNamespace(output_dir=tmp_path)
+
+    class FakeOverrides:
+        @staticmethod
+        def model_validate(values: dict[str, Any]) -> Any:
+            captured.update(values)
+            return SimpleNamespace(build_setup=lambda: setup_args)
+
+    monkeypatch.setattr(robolab_server, "OmniSetupOverrides", FakeOverrides)
+    monkeypatch.setattr(robolab_server, "init_output_dir", lambda _: None)
+    monkeypatch.setattr(robolab_server, "disable_runtime_ema_for_frozen_config", lambda setup: setup)
+
+    service = object.__new__(robolab_server.RobolabPolicyService)
+    result = service._build_setup_args(
+        robolab_server.RobolabServerArgs(
+            checkpoint_path="/unused/model",
+            guardrails=False,
+            offload_guardrail_models=True,
+            hidden_state_capture_dir=tmp_path / "capture",
+            hidden_state_capture_chunks=[3, 5, 7],
+        )
+    )
+
+    assert result is setup_args
+    assert captured["guardrails"] is False
+    assert captured["offload_guardrail_models"] is True
+    assert captured["use_torch_compile"] is False
+    assert captured["use_cuda_graphs"] is False
+
+    captured.clear()
+    service._build_setup_args(
+        robolab_server.RobolabServerArgs(
+            checkpoint_path="/unused/model",
+            rope_qk_capture_dir=tmp_path / "rope_capture",
+            rope_qk_capture_chunks=[5],
+        )
+    )
+    assert captured["use_torch_compile"] is False
+    assert captured["use_cuda_graphs"] is False
 
 
 def test_joint_pos_observation_preprocessing_matches_internal_layout() -> None:

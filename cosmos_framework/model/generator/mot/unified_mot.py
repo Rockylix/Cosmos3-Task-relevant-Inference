@@ -549,6 +549,9 @@ class PackedAttentionMoT(nn.Module):
         )
 
         self._apply_rotary_pos_emb = layer_types.apply_rotary_pos_emb
+        # Optional eager-only experiment hook. RoboLab installs it only on
+        # explicitly selected blocks and removes it after the selected request.
+        self._rope_qk_capture_callback: Any | None = None
         self.dispatch_attention_fn = dispatch_attention
         self.replicated_attention_io_local_head_o_proj = False
         self.replicated_attention_io_cp_mesh: Any | None = None
@@ -649,6 +652,16 @@ class PackedAttentionMoT(nn.Module):
             get_gen_seq(packed_sin),
             unsqueeze_dim=1,
         )  # q_gen_: [N_gen,num_heads,head_dim], k_gen_: [N_gen,num_kv_heads,head_dim]
+        if self._rope_qk_capture_callback is not None:
+            self._rope_qk_capture_callback(
+                layer_index=self.layer_idx,
+                q_raw=q_gen,
+                k_raw=k_gen,
+                q_rope=q_gen_,
+                k_rope=k_gen_,
+                cos=get_gen_seq(packed_cos),
+                sin=get_gen_seq(packed_sin),
+            )
 
         packed_query_states_ = from_und_gen_splits(q_und_, q_gen_, pack)  # [N_und+N_gen,num_heads,head_dim]
         packed_key_states_ = from_und_gen_splits(k_und_, k_gen_, pack)  # [N_und+N_gen,num_kv_heads,head_dim]

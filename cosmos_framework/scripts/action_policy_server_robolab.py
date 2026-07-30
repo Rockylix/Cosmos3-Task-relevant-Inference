@@ -58,6 +58,16 @@ from cosmos_framework.scripts.action_policy_server_utils import (
     get_local_ip,
     maybe_init_distributed,
 )
+from cosmos_framework.scripts.robolab_hidden_state_capture import (
+    GenHiddenStateCollector,
+    HiddenStateCapturePlanner,
+    save_capture_artifact,
+)
+from cosmos_framework.scripts.robolab_rope_qk_capture import (
+    GenRopeQKCollector,
+    RopeQKCapturePlanner,
+    save_rope_qk_capture_artifact,
+)
 from cosmos_framework.utils import log
 from cosmos_framework.utils.checkpoint_db import CheckpointDirHf
 from cosmos_framework.utils.lazy_config import instantiate
@@ -320,11 +330,35 @@ class RobolabServerArgs(pydantic.BaseModel):
     """Action domain name passed to get_domain_id()."""
     decode_video: bool = False
     """If set, decode and return the predicted rollout video as a uint8 NumPy array."""
+    hidden_state_capture_dir: Path | None = None
+    """Fresh experiment directory for selected-chunk GEN hidden states and decoded future frames."""
+    hidden_state_capture_chunks: list[int] = pydantic.Field(default_factory=list)
+    """Zero-based action-chunk indexes to capture independently for each exact prompt."""
+    hidden_state_capture_disk_reserve_gib: float = pydantic.Field(default=10.0, ge=0.0)
+    """Free disk space that must remain after allocating each raw hidden-state tensor."""
+    rope_qk_capture_dir: Path | None = None
+    """Fresh experiment directory for selected pre/post-RoPE GEN Q/K tensors."""
+    rope_qk_capture_chunks: list[int] = pydantic.Field(default_factory=list)
+    """Zero-based action-chunk indexes to capture independently for each exact prompt."""
+    rope_qk_capture_steps: list[int] = pydantic.Field(default_factory=lambda: [0, 3])
+    """Denoising steps whose Q/K tensors are captured."""
+    rope_qk_capture_blocks: list[int] = pydantic.Field(default_factory=lambda: [0, 10, 20, 27])
+    """Transformer blocks whose Q/K tensors are captured."""
+    rope_qk_capture_branches: list[Literal["conditional", "unconditional"]] = pydantic.Field(
+        default_factory=lambda: ["conditional"]
+    )
+    """CFG branches whose Q/K tensors are captured."""
+    rope_qk_capture_disk_reserve_gib: float = pydantic.Field(default=2.0, ge=0.0)
+    """Free disk space that must remain after allocating the Q/K tensor files."""
 
     output_dir: Path | None = None
     """Output directory for OmniInference. Defaults to /tmp/cosmos3_action_server/robolab."""
     sampler: Literal["unipc", "edm"] = "unipc"
     """Diffusion sampler used by OmniInference."""
+    guardrails: bool = True
+    """Enable inference guardrails."""
+    offload_guardrail_models: bool = False
+    """Offload guardrail models to CPU when guardrails are enabled."""
 
     seed: int = 0
     """Base generation seed used to initialize the request RNG."""
@@ -357,6 +391,54 @@ class RobolabServerArgs(pydantic.BaseModel):
     """State/history action rows to trim from the generated action output."""
     format_prompt_as_json: bool | None = None
     """Serve prompts as structured JSON (matching training ``format_prompt_as_json``)."""
+
+    @pydantic.model_validator(mode="after")
+    def _validate_hidden_state_capture(self) -> "RobolabServerArgs":
+        hidden_capture_enabled = self.hidden_state_capture_dir is not None
+        rope_capture_enabled = self.rope_qk_capture_dir is not None
+        if hidden_capture_enabled != bool(self.hidden_state_capture_chunks):
+            raise ValueError("--hidden-state-capture-dir and --hidden-state-capture-chunks must be set together")
+        if any(index < 0 for index in self.hidden_state_capture_chunks):
+            raise ValueError("--hidden-state-capture-chunks must contain non-negative indexes")
+        if len(set(self.hidden_state_capture_chunks)) != len(self.hidden_state_capture_chunks):
+            raise ValueError("--hidden-state-capture-chunks must not contain duplicates")
+        if hidden_capture_enabled and self.num_steps != 4:
+            raise ValueError(
+                "Hidden-state capture currently requires --num-steps 4 so artifacts remain "
+                "compatible with scripts/analyze_fis_dit_hidden_states.py"
+            )
+        if hidden_capture_enabled and self.guidance == 1.0:
+            raise ValueError(
+                "Hidden-state capture requires CFG guidance != 1 so both conditional and "
+                "unconditional calls are available to the reference analysis"
+            )
+        if rope_capture_enabled != bool(self.rope_qk_capture_chunks):
+            raise ValueError("--rope-qk-capture-dir and --rope-qk-capture-chunks must be set together")
+        if hidden_capture_enabled and rope_capture_enabled:
+            raise ValueError("Hidden-state capture and RoPE Q/K capture are mutually exclusive")
+        if any(index < 0 for index in self.rope_qk_capture_chunks):
+            raise ValueError("--rope-qk-capture-chunks must contain non-negative indexes")
+        if len(set(self.rope_qk_capture_chunks)) != len(self.rope_qk_capture_chunks):
+            raise ValueError("--rope-qk-capture-chunks must not contain duplicates")
+        if rope_capture_enabled and not self.rope_qk_capture_steps:
+            raise ValueError("--rope-qk-capture-steps must not be empty")
+        if any(step < 0 or step >= self.num_steps for step in self.rope_qk_capture_steps):
+            raise ValueError(f"--rope-qk-capture-steps must be in [0, {self.num_steps - 1}]")
+        if len(set(self.rope_qk_capture_steps)) != len(self.rope_qk_capture_steps):
+            raise ValueError("--rope-qk-capture-steps must not contain duplicates")
+        if rope_capture_enabled and not self.rope_qk_capture_blocks:
+            raise ValueError("--rope-qk-capture-blocks must not be empty")
+        if any(block < 0 for block in self.rope_qk_capture_blocks):
+            raise ValueError("--rope-qk-capture-blocks must contain non-negative indexes")
+        if len(set(self.rope_qk_capture_blocks)) != len(self.rope_qk_capture_blocks):
+            raise ValueError("--rope-qk-capture-blocks must not contain duplicates")
+        if rope_capture_enabled and not self.rope_qk_capture_branches:
+            raise ValueError("--rope-qk-capture-branches must not be empty")
+        if len(set(self.rope_qk_capture_branches)) != len(self.rope_qk_capture_branches):
+            raise ValueError("--rope-qk-capture-branches must not contain duplicates")
+        if self.guidance == 1.0 and "unconditional" in self.rope_qk_capture_branches:
+            raise ValueError("Unconditional RoPE Q/K capture requires CFG guidance != 1")
+        return self
 
 
 class RobolabPolicyService:
@@ -410,6 +492,60 @@ class RobolabPolicyService:
         if self.cfg.image_height <= 0 or self.cfg.image_width <= 0:
             raise ValueError("--image-height and --image-width must be positive")
 
+        self._capture_planner: HiddenStateCapturePlanner | None = None
+        self._capture_disk_reserve_bytes = int(args.hidden_state_capture_disk_reserve_gib * (1 << 30))
+        if args.hidden_state_capture_dir is not None:
+            self._capture_planner = HiddenStateCapturePlanner(
+                output_root=args.hidden_state_capture_dir,
+                chunk_indices=args.hidden_state_capture_chunks,
+                experiment_metadata={
+                    "checkpoint_path": self.cfg.checkpoint_path,
+                    "domain_name": self.cfg.domain_name,
+                    "guidance": self.cfg.guidance,
+                    "num_steps": self.cfg.num_steps,
+                    "shift": self.cfg.shift,
+                    "conditioning_fps": self.cfg.conditioning_fps,
+                    "action_chunk_size": self.cfg.action_chunk_size,
+                    "disk_reserve_gib": args.hidden_state_capture_disk_reserve_gib,
+                },
+            )
+            log.info(
+                "[robolab-hidden-capture] enabled "
+                f"output={self._capture_planner.output_root} "
+                f"chunk_indices={list(self._capture_planner.chunk_indices)}"
+            )
+
+        self._rope_qk_capture_planner: RopeQKCapturePlanner | None = None
+        self._rope_qk_capture_disk_reserve_bytes = int(args.rope_qk_capture_disk_reserve_gib * (1 << 30))
+        self._rope_qk_capture_steps = list(args.rope_qk_capture_steps)
+        self._rope_qk_capture_blocks = list(args.rope_qk_capture_blocks)
+        self._rope_qk_capture_branches = list(args.rope_qk_capture_branches)
+        if args.rope_qk_capture_dir is not None:
+            self._rope_qk_capture_planner = RopeQKCapturePlanner(
+                output_root=args.rope_qk_capture_dir,
+                chunk_indices=args.rope_qk_capture_chunks,
+                experiment_metadata={
+                    "checkpoint_path": self.cfg.checkpoint_path,
+                    "domain_name": self.cfg.domain_name,
+                    "guidance": self.cfg.guidance,
+                    "num_steps": self.cfg.num_steps,
+                    "shift": self.cfg.shift,
+                    "conditioning_fps": self.cfg.conditioning_fps,
+                    "action_chunk_size": self.cfg.action_chunk_size,
+                    "selected_steps": self._rope_qk_capture_steps,
+                    "selected_blocks": self._rope_qk_capture_blocks,
+                    "selected_branches": self._rope_qk_capture_branches,
+                    "disk_reserve_gib": args.rope_qk_capture_disk_reserve_gib,
+                },
+            )
+            log.info(
+                "[robolab-rope-qk-capture] enabled "
+                f"output={self._rope_qk_capture_planner.output_root} "
+                f"chunk_indices={list(self._rope_qk_capture_planner.chunk_indices)} "
+                f"steps={self._rope_qk_capture_steps} blocks={self._rope_qk_capture_blocks} "
+                f"branches={self._rope_qk_capture_branches}"
+            )
+
         self._lock = threading.Lock()
         self._rng = np.random.default_rng(self.cfg.seed)
         log.info(
@@ -426,7 +562,13 @@ class RobolabPolicyService:
             "checkpoint_path": args.checkpoint_path,
             "output_dir": args.output_dir or _DEFAULT_ROBOLAB_OUTPUT_DIR,
             "sampler": args.sampler,
+            "guardrails": args.guardrails,
+            "offload_guardrail_models": args.offload_guardrail_models,
         }
+        if args.hidden_state_capture_dir is not None or args.rope_qk_capture_dir is not None:
+            # Experiment hooks must observe eager transformer/attention calls.
+            setup_overrides["use_torch_compile"] = False
+            setup_overrides["use_cuda_graphs"] = False
         if args.experiment is not None:
             setup_overrides["experiment"] = args.experiment
         if args.experiment_overrides:
@@ -579,15 +721,106 @@ class RobolabPolicyService:
         seed = self._next_seed()
         log.info(f"[robolab-policy-server] prompt={data_batch['ai_caption'][0]!r} seed={seed}")
 
-        with self._lock:
-            with torch.inference_mode():
-                samples = self.model.generate_samples_from_batch(
-                    data_batch,
-                    guidance=self.cfg.guidance,
-                    seed=[seed],
-                    num_steps=self.cfg.num_steps,
-                    shift=self.cfg.shift,
-                )
+        prompt = obs["prompt"]
+        hidden_capture = self._capture_planner.select(prompt=prompt, seed=seed) if self._capture_planner else None
+        rope_qk_capture = (
+            self._rope_qk_capture_planner.select(prompt=prompt, seed=seed) if self._rope_qk_capture_planner else None
+        )
+        selected_capture = hidden_capture or rope_qk_capture
+        conditioning_image = _extract_observation_image(obs).copy() if selected_capture is not None else None
+        collector: GenHiddenStateCollector | GenRopeQKCollector | None = None
+        capture_profile: dict[str, Any] | None = None
+        decoded_video: torch.Tensor | None = None
+
+        try:
+            with self._lock:
+                with torch.inference_mode():
+                    if hidden_capture is not None:
+                        collector = GenHiddenStateCollector(
+                            torch=torch,
+                            net=self.model.net,
+                            guidance=self.cfg.guidance,
+                            num_steps=self.cfg.num_steps,
+                            output_dir=hidden_capture.partial_dir,
+                            disk_reserve_bytes=self._capture_disk_reserve_bytes,
+                        )
+                    elif rope_qk_capture is not None:
+                        collector = GenRopeQKCollector(
+                            torch=torch,
+                            net=self.model.net,
+                            guidance=self.cfg.guidance,
+                            num_steps=self.cfg.num_steps,
+                            selected_steps=self._rope_qk_capture_steps,
+                            selected_blocks=self._rope_qk_capture_blocks,
+                            selected_branches=self._rope_qk_capture_branches,
+                            output_dir=rope_qk_capture.partial_dir,
+                            disk_reserve_bytes=self._rope_qk_capture_disk_reserve_bytes,
+                        )
+                    if collector is None:
+                        samples = self.model.generate_samples_from_batch(
+                            data_batch,
+                            guidance=self.cfg.guidance,
+                            seed=[seed],
+                            num_steps=self.cfg.num_steps,
+                            shift=self.cfg.shift,
+                        )
+                    else:
+                        with collector:
+                            samples = self.model.generate_samples_from_batch(
+                                data_batch,
+                                guidance=self.cfg.guidance,
+                                seed=[seed],
+                                num_steps=self.cfg.num_steps,
+                                shift=self.cfg.shift,
+                            )
+                        capture_profile = collector.finish()
+                        decoded_video = self.model.decode(samples["vision"][0])
+                        assert conditioning_image is not None
+                        if hidden_capture is not None:
+                            metadata = save_capture_artifact(
+                                torch=torch,
+                                selection=hidden_capture,
+                                profile=capture_profile,
+                                vision_latent=samples["vision"][0],
+                                pred_video=decoded_video,
+                                conditioning_image=conditioning_image,
+                                fps=self.cfg.conditioning_fps,
+                                action_chunk_size=self.cfg.action_chunk_size,
+                            )
+                            assert self._capture_planner is not None
+                            self._capture_planner.complete(hidden_capture, metadata)
+                            log.info(
+                                "[robolab-hidden-capture] completed "
+                                f"prompt={prompt!r} chunk_index={hidden_capture.chunk_index} "
+                                f"artifact={hidden_capture.final_dir} raw_shape={capture_profile['raw_shape']}"
+                            )
+                        else:
+                            assert rope_qk_capture is not None
+                            metadata = save_rope_qk_capture_artifact(
+                                torch=torch,
+                                selection=rope_qk_capture,
+                                profile=capture_profile,
+                                vision_latent=samples["vision"][0],
+                                pred_video=decoded_video,
+                                conditioning_image=conditioning_image,
+                                fps=self.cfg.conditioning_fps,
+                                action_chunk_size=self.cfg.action_chunk_size,
+                            )
+                            assert self._rope_qk_capture_planner is not None
+                            self._rope_qk_capture_planner.complete(rope_qk_capture, metadata)
+                            log.info(
+                                "[robolab-rope-qk-capture] completed "
+                                f"prompt={prompt!r} chunk_index={rope_qk_capture.chunk_index} "
+                                f"artifact={rope_qk_capture.final_dir} "
+                                f"steps={capture_profile['selected_steps']} "
+                                f"blocks={capture_profile['selected_blocks']}"
+                            )
+        except Exception as exc:
+            if hidden_capture is not None and self._capture_planner is not None:
+                self._capture_planner.mark_failed(hidden_capture, exc)
+            if rope_qk_capture is not None and self._rope_qk_capture_planner is not None:
+                self._rope_qk_capture_planner.mark_failed(rope_qk_capture, exc)
+            raise
 
         action = samples["action"][0][:, : self.cfg.action_dim]  # [T,D]
         action = action[self.cfg.history_length :]  # [T2,D]
@@ -612,8 +845,10 @@ class RobolabPolicyService:
 
         outputs: dict[str, Any] = {"action": action_np}
         if self.cfg.decode_video:
-            pred_vision_latent = samples["vision"][0]  # [C,T,H,W]
-            video = self.model.decode(pred_vision_latent)  # [1,C,T,H,W]
+            if decoded_video is None:
+                pred_vision_latent = samples["vision"][0]  # [C,T,H,W]
+                decoded_video = self.model.decode(pred_vision_latent)  # [1,C,T,H,W]
+            video = decoded_video
             video = ((video[0].clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8).permute(1, 2, 3, 0)  # [T,H,W,3]
             outputs["video"] = video.detach().cpu().numpy()
         return outputs
