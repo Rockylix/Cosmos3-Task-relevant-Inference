@@ -12,9 +12,19 @@ import torch
 from torch import nn
 from torch.distributed import ProcessGroup
 
+from cosmos_framework.data.generator.sequence_packing.runtime import (
+    SequencePack,
+    from_all_seq,
+    from_und_gen_splits,
+    get_device_and_dtype,
+    get_gen_seq,
+    get_und_seq,
+    set_gen_seq,
+    set_und_seq,
+    zeros_like,
+)
 from cosmos_framework.model.attention import attention as imaginaire_attention
 from cosmos_framework.model.attention.masks import CausalType
-from cosmos_framework.utils import log
 from cosmos_framework.model.generator.mot.attention import (
     AttentionMaskType,
     dispatch_attention,
@@ -73,17 +83,7 @@ from cosmos_framework.model.generator.reasoner.qwen3_vl_moe.qwen3_vl_moe import 
     Qwen3VLMoeVisionModel,
 )
 from cosmos_framework.model.generator.utils.memory import KVToStore, MemoryState, MemoryValue
-from cosmos_framework.data.generator.sequence_packing.runtime import (
-    SequencePack,
-    from_all_seq,
-    from_und_gen_splits,
-    get_device_and_dtype,
-    get_gen_seq,
-    get_und_seq,
-    set_gen_seq,
-    set_und_seq,
-    zeros_like,
-)
+from cosmos_framework.utils import log
 
 # Torch optimization settings
 torch._dynamo.config.cache_size_limit = 512
@@ -552,6 +552,13 @@ class PackedAttentionMoT(nn.Module):
         # Optional eager-only experiment hook. RoboLab installs it only on
         # explicitly selected blocks and removes it after the selected request.
         self._rope_qk_capture_callback: Any | None = None
+        # Optional eager-only experiment hook that may replace the GEN Q/K
+        # projection+norm+RoPE path. It is unset in normal inference.
+        self._sparse_qk_projection_callback: Any | None = None
+        # Optional eager-only read-only statistics hook. It observes the exact
+        # post-norm/post-RoPE Q/K and post-projection/head-reshape V tensors used
+        # by GEN attention, including cached understanding K/V after cache fill.
+        self._attention_stats_capture_callback: Any | None = None
         self.dispatch_attention_fn = dispatch_attention
         self.replicated_attention_io_local_head_o_proj = False
         self.replicated_attention_io_cp_mesh: Any | None = None
@@ -613,10 +620,11 @@ class PackedAttentionMoT(nn.Module):
         """
 
         q_und_in = self.q_proj(get_und_seq(pack))  # [N_und,num_heads*head_dim]
-        q_gen_in = self.q_proj_moe_gen(get_gen_seq(pack))  # [N_gen,num_heads*head_dim]
-
+        if self._sparse_qk_projection_callback is None:
+            q_gen_in = self.q_proj_moe_gen(get_gen_seq(pack))  # [N_gen,num_heads*head_dim]
         k_und_in = self.k_proj(get_und_seq(pack))  # [N_und,num_kv_heads*head_dim]
-        k_gen_in = self.k_proj_moe_gen(get_gen_seq(pack))  # [N_gen,num_kv_heads*head_dim]
+        if self._sparse_qk_projection_callback is None:
+            k_gen_in = self.k_proj_moe_gen(get_gen_seq(pack))  # [N_gen,num_kv_heads*head_dim]
 
         v_und_in = self.v_proj(get_und_seq(pack))  # [N_und,num_kv_heads*head_dim]
         v_gen_in = self.v_proj_moe_gen(get_gen_seq(pack))  # [N_gen,num_kv_heads*head_dim]
@@ -625,15 +633,16 @@ class PackedAttentionMoT(nn.Module):
         k_und = k_und_in.view(-1, self.num_key_value_heads, self.head_dim)  # [N_und,num_kv_heads,head_dim]
         v_und = v_und_in.view(-1, self.num_key_value_heads, self.head_dim)  # [N_und,num_kv_heads,head_dim]
 
-        q_gen = q_gen_in.view(-1, self.num_attention_heads, self.head_dim)  # [N_gen,num_heads,head_dim]
-        k_gen = k_gen_in.view(-1, self.num_key_value_heads, self.head_dim)  # [N_gen,num_kv_heads,head_dim]
+        if self._sparse_qk_projection_callback is None:
+            q_gen = q_gen_in.view(-1, self.num_attention_heads, self.head_dim)
+            k_gen = k_gen_in.view(-1, self.num_key_value_heads, self.head_dim)
         v_gen = v_gen_in.view(-1, self.num_key_value_heads, self.head_dim)  # [N_gen,num_kv_heads,head_dim]
 
         q_und = self.q_norm(q_und)  # [N_und,num_heads,head_dim]
         k_und = self.k_norm(k_und)  # [N_und,num_kv_heads,head_dim]
-
-        q_gen = self.q_norm_moe_gen(q_gen)  # [N_gen,num_heads,head_dim]
-        k_gen = self.k_norm_moe_gen(k_gen)  # [N_gen,num_kv_heads,head_dim]
+        if self._sparse_qk_projection_callback is None:
+            q_gen = self.q_norm_moe_gen(q_gen)
+            k_gen = self.k_norm_moe_gen(k_gen)
 
         packed_cos = packed_position_embeddings[0]
         packed_sin = packed_position_embeddings[1]
@@ -645,14 +654,48 @@ class PackedAttentionMoT(nn.Module):
             get_und_seq(packed_sin),
             unsqueeze_dim=1,
         )  # q_und_: [N_und,num_heads,head_dim], k_und_: [N_und,num_kv_heads,head_dim]
-        q_gen_, k_gen_ = self._apply_rotary_pos_emb(
-            q_gen,
-            k_gen,
-            get_gen_seq(packed_cos),
-            get_gen_seq(packed_sin),
-            unsqueeze_dim=1,
-        )  # q_gen_: [N_gen,num_heads,head_dim], k_gen_: [N_gen,num_kv_heads,head_dim]
+        if self._sparse_qk_projection_callback is None:
+            q_gen_, k_gen_ = self._apply_rotary_pos_emb(
+                q_gen,
+                k_gen,
+                get_gen_seq(packed_cos),
+                get_gen_seq(packed_sin),
+                unsqueeze_dim=1,
+            )
+        else:
+            sparse_qk = self._sparse_qk_projection_callback(
+                layer_index=self.layer_idx,
+                hidden_states=get_gen_seq(pack),
+                cos=get_gen_seq(packed_cos),
+                sin=get_gen_seq(packed_sin),
+                q_proj=self.q_proj_moe_gen,
+                k_proj=self.k_proj_moe_gen,
+                q_norm=self.q_norm_moe_gen,
+                k_norm=self.k_norm_moe_gen,
+                apply_rotary_pos_emb=self._apply_rotary_pos_emb,
+                num_attention_heads=self.num_attention_heads,
+                num_key_value_heads=self.num_key_value_heads,
+                head_dim=self.head_dim,
+            )
+            if sparse_qk is None:
+                q_gen_in = self.q_proj_moe_gen(get_gen_seq(pack))
+                k_gen_in = self.k_proj_moe_gen(get_gen_seq(pack))
+                q_gen = q_gen_in.view(-1, self.num_attention_heads, self.head_dim)
+                k_gen = k_gen_in.view(-1, self.num_key_value_heads, self.head_dim)
+                q_gen = self.q_norm_moe_gen(q_gen)
+                k_gen = self.k_norm_moe_gen(k_gen)
+                q_gen_, k_gen_ = self._apply_rotary_pos_emb(
+                    q_gen,
+                    k_gen,
+                    get_gen_seq(packed_cos),
+                    get_gen_seq(packed_sin),
+                    unsqueeze_dim=1,
+                )
+            else:
+                q_gen, k_gen, q_gen_, k_gen_ = sparse_qk
         if self._rope_qk_capture_callback is not None:
+            if q_gen is None or k_gen is None:
+                raise RuntimeError("RoPE Q/K capture cannot run with raw-Q/K restore disabled")
             self._rope_qk_capture_callback(
                 layer_index=self.layer_idx,
                 q_raw=q_gen,
@@ -684,6 +727,31 @@ class PackedAttentionMoT(nn.Module):
         else:
             packed_key_states_normalized_ = None
 
+        attention_stats_inputs: dict[str, Any] | None = None
+        if self._attention_stats_capture_callback is not None:
+            num_gen_tokens = int(pack["_num_full_tokens"])
+            cached_und_k = getattr(memory_value, "und_k_cached", None)
+            cached_und_v = getattr(memory_value, "und_v_cached", None)
+            if cached_und_k is not None:
+                # InferenceTextKVMemoryValue stores [1,N_und,H_kv,D].
+                assert cached_und_v is not None
+                actual_und_k_for_gen = cached_und_k.squeeze(0)
+                actual_und_v_for_gen = cached_und_v.squeeze(0)
+            else:
+                actual_und_k_for_gen = (
+                    k_und_for_gen_ if self.k_norm_und_for_gen is not None else k_und_
+                )
+                actual_und_v_for_gen = v_und
+            attention_stats_inputs = {
+                "layer_index": self.layer_idx,
+                "q_gen": q_gen_[:num_gen_tokens],
+                "k_ar": actual_und_k_for_gen,
+                "k_gen": k_gen_[:num_gen_tokens],
+                "v_ar": actual_und_v_for_gen,
+                "v_gen": v_gen[:num_gen_tokens],
+                "scaling": self.scaling,
+            }
+
         packed_attn_output, kv_to_store = self.dispatch_attention_fn(
             packed_query_states_,
             packed_key_states_,
@@ -693,6 +761,14 @@ class PackedAttentionMoT(nn.Module):
             memory_value=memory_value,
             packed_key_states_normalized=packed_key_states_normalized_,
         )
+        if attention_stats_inputs is not None:
+            actual_gen_attn_output = get_gen_seq(packed_attn_output)[:num_gen_tokens].reshape(
+                -1, self.num_attention_heads, self.head_dim
+            )
+            self._attention_stats_capture_callback(
+                **attention_stats_inputs,
+                attn_output_gen=actual_gen_attn_output,
+            )
 
         # Produce kv_to_store for MemoryState.write_for_layer() when the
         # dispatch didn't already provide one (e.g. standard or AR frame-0
