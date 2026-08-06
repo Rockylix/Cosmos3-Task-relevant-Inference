@@ -100,6 +100,9 @@ def test_server_args_default_to_released_droid_serving_config() -> None:
     assert args.hidden_state_capture_dir is None
     assert args.hidden_state_capture_chunks == []
     assert args.hidden_state_capture_disk_reserve_gib == 10.0
+    assert args.block_residual_capture_dir is None
+    assert args.block_residual_capture_chunks == []
+    assert args.block_residual_capture_disk_reserve_gib == 5.0
     assert args.rope_qk_capture_dir is None
     assert args.rope_qk_capture_chunks == []
     assert args.rope_qk_capture_steps == [0, 3]
@@ -148,6 +151,23 @@ def test_rope_qk_capture_args_validate_selection(tmp_path: Path) -> None:
         )
 
 
+def test_block_residual_capture_args_validate_selection(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="must be set together"):
+        robolab_server.RobolabServerArgs(block_residual_capture_dir=tmp_path)
+    with pytest.raises(ValueError, match="non-negative"):
+        robolab_server.RobolabServerArgs(
+            block_residual_capture_dir=tmp_path,
+            block_residual_capture_chunks=[-1],
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        robolab_server.RobolabServerArgs(
+            hidden_state_capture_dir=tmp_path / "hidden",
+            hidden_state_capture_chunks=[3],
+            block_residual_capture_dir=tmp_path / "residual",
+            block_residual_capture_chunks=[3],
+        )
+
+
 def test_build_setup_args_propagates_guardrail_options(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
     setup_args = SimpleNamespace(output_dir=tmp_path)
@@ -176,6 +196,17 @@ def test_build_setup_args_propagates_guardrail_options(monkeypatch: pytest.Monke
     assert result is setup_args
     assert captured["guardrails"] is False
     assert captured["offload_guardrail_models"] is True
+    assert captured["use_torch_compile"] is False
+    assert captured["use_cuda_graphs"] is False
+
+    captured.clear()
+    service._build_setup_args(
+        robolab_server.RobolabServerArgs(
+            checkpoint_path="/unused/model",
+            block_residual_capture_dir=tmp_path / "residual_capture",
+            block_residual_capture_chunks=[3],
+        )
+    )
     assert captured["use_torch_compile"] is False
     assert captured["use_cuda_graphs"] is False
 
