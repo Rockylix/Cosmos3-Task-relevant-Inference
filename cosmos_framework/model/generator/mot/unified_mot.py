@@ -1027,25 +1027,56 @@ def _impl_forward(
     # Derive gen_only once (outside compile) if using MemoryState
     memory_gen_only = memory.is_gen_only() if memory is not None else False
 
-    for i, decoder_layer in enumerate(self.layers):
-        # MemoryState: produce read-only MemoryValue for this layer (outside compile)
-        memory_value = memory.read_for_layer(i) if memory is not None else None
-
-        hidden_states, lbl_metadata_dict, kv_to_store = decoder_layer(
-            hidden_states,
-            attention_mask,
-            position_embeddings,
-            natten_metadata=None if natten_metadata_list is None else natten_metadata_list[i],
-            memory_value=memory_value,
-            gen_only=memory_gen_only,
+    # Optional eager-only experiment controller.  The normal deployment path
+    # never installs this attribute.  Keeping the block-loop interception here
+    # (rather than inside an attention kernel) lets an experiment make the
+    # *whole* decoder layer consume a genuinely shorter SequencePack.
+    sparse_controller = getattr(self, "_action_attention_mass90_controller", None)
+    if sparse_controller is not None:
+        sparse_controller.begin_stack(
+            hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
+            memory_gen_only=memory_gen_only,
+            natten_metadata_list=natten_metadata_list,
         )
 
-        # MemoryState: store K/V produced by this layer (outside compile)
-        if kv_to_store is not None and memory is not None:
-            memory.write_for_layer(i, kv_to_store)
+    try:
+        for i, decoder_layer in enumerate(self.layers):
+            # MemoryState: produce read-only MemoryValue for this layer (outside compile)
+            memory_value = memory.read_for_layer(i) if memory is not None else None
 
-        for pathway, lbl_metadata in lbl_metadata_dict.items():
-            lbl_metadata_all[pathway].append(lbl_metadata)
+            if sparse_controller is not None and sparse_controller.stack_active:
+                hidden_states, lbl_metadata_dict, kv_to_store = sparse_controller.run_layer(
+                    block=i,
+                    decoder_layer=decoder_layer,
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    memory_value=memory_value,
+                    gen_only=memory_gen_only,
+                )
+            else:
+                hidden_states, lbl_metadata_dict, kv_to_store = decoder_layer(
+                    hidden_states,
+                    attention_mask,
+                    position_embeddings,
+                    natten_metadata=None if natten_metadata_list is None else natten_metadata_list[i],
+                    memory_value=memory_value,
+                    gen_only=memory_gen_only,
+                )
+
+            # MemoryState: store only K/V from the committed (second) pass.
+            if kv_to_store is not None and memory is not None:
+                memory.write_for_layer(i, kv_to_store)
+
+            for pathway, lbl_metadata in lbl_metadata_dict.items():
+                lbl_metadata_all[pathway].append(lbl_metadata)
+    except Exception:
+        if sparse_controller is not None:
+            sparse_controller.abort_stack()
+        raise
+
+    if sparse_controller is not None and sparse_controller.stack_active:
+        hidden_states = sparse_controller.end_stack(hidden_states)
 
     # Compute the load balancing loss across all layers. For dense models, final_lbl_metadata
     # will be an empty dictionary. For MoE models, it will be a dictionary with the stacked
