@@ -31,7 +31,7 @@ class ActionMass90ServerArgs(RobolabServerArgs):
 
     intervention_output_dir: Path = Path(
         "/root/robolab/experiments/preliminary/sparsity/action_attention_mass90/"
-        "action_attention_mass90_BananaInBowlTask_sim_shift1_v1/server"
+        "action_attention_mass90_sharedmask_BananaInBowlTask_sim_shift1_v1/server"
     )
     """Per-request token accounting output directory."""
 

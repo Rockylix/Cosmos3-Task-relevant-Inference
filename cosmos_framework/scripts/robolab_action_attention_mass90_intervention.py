@@ -41,6 +41,7 @@ TOKEN_FIELDS = [
     "dropped_this_block",
     "saved_vs_original",
     "retained_vs_original",
+    "selected_spatial_positions",
     "coverage_min",
     "coverage_mean",
 ]
@@ -55,6 +56,7 @@ BLOCK_FIELDS = [
     "gen_tokens_after",
     "future_tokens_before",
     "future_tokens_after",
+    "shared_future_spatial_tokens",
     "dropped_this_block",
     "saved_gen_vs_original",
     "saved_future_vs_original",
@@ -118,7 +120,13 @@ def select_future_mass_union(
     threshold: float,
     eps: float = 1e-12,
 ) -> tuple[Any, Any, list[dict[str, Any]]]:
-    """Select the per-frame union of predicted-action 90%-mass token sets."""
+    """Select one shared spatial mask covering every query/frame 90%-mass set.
+
+    L1..L8 must enter the committed sparse block with exactly the same spatial
+    coordinates.  We therefore compute the minimal set for every
+    ``(predicted_action_query, future_frame)`` independently, take one union in
+    spatial-coordinate space, and apply that shared union to all eight frames.
+    """
 
     num_active = int(active_original_positions.numel())
     if int(q_gen.shape[0]) != num_active or int(k_gen.shape[0]) != num_active:
@@ -163,13 +171,25 @@ def select_future_mass_union(
         if int(original) not in future_original:
             keep_local[local] = True
 
-    frame_rows: list[dict[str, Any]] = []
+    frame_inputs: list[dict[str, Any]] = []
     num_ar = int(k_ar.shape[0])
+    shared_active_spatial: list[int] | None = None
+    shared_union_mask: Any | None = None
     for latent in range(1, 9):
         original_frame = list(map(int, token_layout["latent_positions"][f"L{latent}"]))
-        active_frame_original = [position for position in original_frame if position in original_to_local]
+        active_spatial = [
+            spatial_index for spatial_index, position in enumerate(original_frame) if position in original_to_local
+        ]
+        active_frame_original = [original_frame[spatial_index] for spatial_index in active_spatial]
         if not active_frame_original:
             raise RuntimeError(f"All tokens from L{latent} were pruned")
+        if shared_active_spatial is None:
+            shared_active_spatial = active_spatial
+        elif active_spatial != shared_active_spatial:
+            raise RuntimeError(
+                "Future frames do not share the same active spatial coordinates "
+                f"before L{latent}: expected={shared_active_spatial}, got={active_spatial}"
+            )
         frame_local = torch.tensor(
             [original_to_local[position] for position in active_frame_original],
             dtype=torch.long,
@@ -178,17 +198,41 @@ def select_future_mass_union(
         key_index = frame_local + num_ar
         frame_weights = head_mean.index_select(-1, key_index)
         per_query_mask = minimum_mass_mask(frame_weights, threshold)
-        union_mask = per_query_mask.any(dim=0)
-        selected_frame_local = frame_local[union_mask]
+        frame_union_mask = per_query_mask.any(dim=0)
+        shared_union_mask = (
+            frame_union_mask.clone() if shared_union_mask is None else shared_union_mask | frame_union_mask
+        )
+        frame_inputs.append(
+            {
+                "latent": latent,
+                "frame_local": frame_local,
+                "frame_weights": frame_weights,
+                "active_before": len(active_frame_original),
+            }
+        )
+
+    if shared_union_mask is None or shared_active_spatial is None:
+        raise RuntimeError("Future-frame shared spatial selection produced no mask")
+    selected_spatial = [
+        shared_active_spatial[index]
+        for index, selected in enumerate(shared_union_mask.detach().cpu().tolist())
+        if bool(selected)
+    ]
+    frame_rows: list[dict[str, Any]] = []
+    for frame_input in frame_inputs:
+        frame_local = frame_input["frame_local"]
+        frame_weights = frame_input["frame_weights"]
+        selected_frame_local = frame_local[shared_union_mask]
         keep_local[selected_frame_local] = True
-        selected_mass = frame_weights[:, union_mask].sum(dim=-1)
+        selected_mass = frame_weights[:, shared_union_mask].sum(dim=-1)
         total_mass = frame_weights.sum(dim=-1)
         coverage = selected_mass / total_mass.clamp_min(eps)
         frame_rows.append(
             {
-                "latent": latent,
-                "active_before": len(active_frame_original),
-                "selected_after": int(union_mask.sum().item()),
+                "latent": int(frame_input["latent"]),
+                "active_before": int(frame_input["active_before"]),
+                "selected_after": len(selected_spatial),
+                "selected_spatial_positions": selected_spatial,
                 "coverage_min": float(coverage.min().item()),
                 "coverage_mean": float(coverage.mean().item()),
             }
@@ -430,8 +474,14 @@ class ActionAttentionMass90Controller:
         self._position_embeddings = sparse_position_embeddings
 
         original_future = 8 * int(self._layout["latent_shape_thw"][1]) * int(self._layout["latent_shape_thw"][2])
+        shared_spatial_masks = {tuple(row["selected_spatial_positions"]) for row in frame_rows}
+        if len(shared_spatial_masks) != 1:
+            raise RuntimeError("Committed future frames do not share one spatial mask")
         future_after = sum(int(row["selected_after"]) for row in frame_rows)
         future_before = sum(int(row["active_before"]) for row in frame_rows)
+        shared_spatial_tokens = int(frame_rows[0]["selected_after"])
+        if future_after != 8 * shared_spatial_tokens:
+            raise RuntimeError("Future token count is not 8 times the shared spatial mask size")
         gen_after = int(selected_original.numel())
         original_gen = int(self._layout["num_gen_tokens"])
         num_ar = (
@@ -462,6 +512,7 @@ class ActionAttentionMass90Controller:
                 "gen_tokens_after": gen_after,
                 "future_tokens_before": future_before,
                 "future_tokens_after": future_after,
+                "shared_future_spatial_tokens": shared_spatial_tokens,
                 "dropped_this_block": gen_before - gen_after,
                 "saved_gen_vs_original": original_gen - gen_after,
                 "saved_future_vs_original": original_future - future_after,
@@ -514,11 +565,12 @@ class ActionAttentionMass90Controller:
         retained = [float(row["gen_retained_ratio"]) for row in self._block_rows]
         summary = {
             "schema_version": 1,
-            "experiment": "action_attention_per_query_per_frame_mass_union",
+            "experiment": "action_attention_per_query_per_frame_mass_union_shared_spatial_mask",
             "threshold": self.threshold,
             "probe_output_committed": False,
             "sparse_output_committed": True,
             "dropped_tokens_reenter_later_blocks": False,
+            "future_frames_share_spatial_mask": True,
             "terminal_full_grid_restore": "last-valid-hidden side buffer",
             "physical_block_passes": 2,
             "timing_claim": "none; full probe makes this an oracle validation",

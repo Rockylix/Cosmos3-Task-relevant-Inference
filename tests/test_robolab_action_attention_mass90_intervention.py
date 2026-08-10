@@ -63,6 +63,14 @@ def test_selection_keeps_l0_and_all_actions_and_never_reintroduces_tokens() -> N
     assert set(layout["latent_positions"]["L0"]).issubset(selected_set)
     assert set(layout["action_positions"]).issubset(selected_set)
     assert all(row["selected_after"] >= 1 for row in rows)
+    selected_spatial_by_frame = []
+    for latent in range(1, 9):
+        frame = layout["latent_positions"][f"L{latent}"]
+        selected_spatial_by_frame.append(
+            [spatial for spatial, position in enumerate(frame) if position in selected_set]
+        )
+    assert all(spatial == selected_spatial_by_frame[0] for spatial in selected_spatial_by_frame)
+    assert all(row["selected_spatial_positions"] == selected_spatial_by_frame[0] for row in rows)
 
     q2 = q.index_select(0, local)
     k2 = k_gen.index_select(0, local)
@@ -77,6 +85,32 @@ def test_selection_keeps_l0_and_all_actions_and_never_reintroduces_tokens() -> N
         threshold=0.5,
     )
     assert set(selected2.tolist()).issubset(selected_set)
+
+
+def test_selection_rejects_misaligned_future_frame_regions() -> None:
+    layout = _layout()
+    # L1 misses spatial index 0 while every other future frame remains full.
+    active_list = [position for position in range(60) if position != layout["latent_positions"]["L1"][0]]
+    active = torch.tensor(active_list)
+    torch.manual_seed(8)
+    q = torch.randn(len(active_list), 4, 8)
+    k_gen = torch.randn(len(active_list), 2, 8)
+    k_ar = torch.randn(5, 2, 8)
+    try:
+        select_future_mass_union(
+            torch=torch,
+            q_gen=q,
+            k_ar=k_ar,
+            k_gen=k_gen,
+            scaling=8**-0.5,
+            token_layout=layout,
+            active_original_positions=active,
+            threshold=0.9,
+        )
+    except RuntimeError as exc:
+        assert "same active spatial coordinates" in str(exc)
+    else:
+        raise AssertionError("Expected mismatched future-frame spatial masks to be rejected")
 
 
 def test_pack_and_rope_selection_preserve_original_order() -> None:

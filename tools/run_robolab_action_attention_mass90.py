@@ -37,7 +37,7 @@ EPISODE_HDF5 = Path(
 )
 OUTPUT_ROOT = Path(
     "/root/robolab/experiments/preliminary/sparsity/action_attention_mass90/"
-    "action_attention_mass90_BananaInBowlTask_c3_shift1_v1"
+    "action_attention_mass90_sharedmask_BananaInBowlTask_c3_shift1_v1"
 )
 PROMPT = "Pick up the banana and place it in the bowl"
 SEED = 579362556
