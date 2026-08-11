@@ -6,6 +6,7 @@ import torch
 
 from cosmos_framework.scripts.robolab_step0_fixed_roi_velocity_cache import (
     GuidedBackgroundVelocityCacheSampler,
+    VELOCITY_CACHE_STRATEGY_VERSION,
     action_aligned_future_spatial_profiles,
     aggregate_fixed_roi,
     expand_token_roi_to_velocity_grid,
@@ -32,6 +33,10 @@ def _layout(spatial: int = 2) -> dict:
             for index in range(33)
         ],
     }
+
+
+def test_strategy_version_is_v1() -> None:
+    assert VELOCITY_CACHE_STRATEGY_VERSION == "v1"
 
 
 def test_action_aligned_profiles_use_all_frames_and_normalize() -> None:

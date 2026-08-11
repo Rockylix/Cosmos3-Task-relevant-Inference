@@ -23,6 +23,7 @@ from cosmos_framework.scripts.action_policy_server_utils import get_local_ip
 from cosmos_framework.scripts.robolab_step0_fixed_roi_velocity_cache import (
     GuidedBackgroundVelocityCacheSampler,
     Step0FixedROISparseController,
+    VELOCITY_CACHE_STRATEGY_VERSION,
 )
 from cosmos_framework.utils import log
 
@@ -92,6 +93,7 @@ class Step0FixedROIPolicyService(RobolabPolicyService):
             }
             self._summaries.append(summary)
             aggregate = {
+                "strategy_version": VELOCITY_CACHE_STRATEGY_VERSION,
                 "completed_requests": len(self._summaries),
                 "mean_generation_wall_s": sum(item["generation_wall_s"] for item in self._summaries)
                 / len(self._summaries),
@@ -121,7 +123,8 @@ class Step0FixedROIPolicyService(RobolabPolicyService):
 
 def serve(args: Step0FixedROIServerArgs) -> None:
     log.info(
-        f"[step0-fixed-roi-server] host={socket.gethostname()} bind={args.host}:{int(args.port)} "
+        f"[step0-fixed-roi-server] version={VELOCITY_CACHE_STRATEGY_VERSION} "
+        f"host={socket.gethostname()} bind={args.host}:{int(args.port)} "
         f"shift={args.shift} threshold={args.fixed_roi_mass_threshold} "
         f"first_sparse_block={args.first_sparse_block}"
     )

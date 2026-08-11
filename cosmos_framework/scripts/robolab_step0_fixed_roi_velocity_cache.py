@@ -31,6 +31,9 @@ from cosmos_framework.scripts.robolab_action_attention_mass90_intervention impor
 )
 
 
+VELOCITY_CACHE_STRATEGY_VERSION = "v1"
+
+
 def action_aligned_future_spatial_profiles(
     *,
     torch: Any,
@@ -359,6 +362,7 @@ class Step0FixedROISparseController(ActionAttentionMass90Controller):
         total_calls = expected_blocks
         summary = {
             "schema_version": 1,
+            "strategy_version": VELOCITY_CACHE_STRATEGY_VERSION,
             "experiment": "step0_profile_fixed_roi_guided_background_velocity_cache",
             "threshold": self.threshold,
             "aggregation": "max over step0 branch x B4-B27 x L1-L8, then minimum mass mask",

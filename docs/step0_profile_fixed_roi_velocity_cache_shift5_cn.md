@@ -1,9 +1,11 @@
-# Step 0 全量 Profile、固定 ROI 稀疏与背景 Velocity 缓存实验（shift=5）
+# Velocity Cache v1：Step 0 全量 Profile、固定 ROI 稀疏与背景 Velocity 缓存（shift=5）
 
 ## 1. 结论摘要
 
 该策略已完成单 chunk 配对验证和一次完整 RoboLab 闭环：
 
+- 当前策略版本固定为 `Velocity Cache v1`；artifact 字段为 `strategy_version: "v1"`；
+- 标准五任务评估为 `4/5`（80%）；
 - `BananaInBowlTask` 单次仿真成功，`1/1`；
 - 每个 policy chunk 的 step 0、B0–B27 全量计算；
 - step 1–3 的 B0–B3 全量，B4–B27 真正使用缩短后的 token 序列；
@@ -176,6 +178,38 @@ step 0 velocity 是明显陈旧的时间相关向量场。它在最后一步与�
 - request generation wall time mean：0.819s。
 
 该成功结果只是一条 episode，不能声明任务成功率保持不变。历史 baseline task 的服务器配置和 compile 状态不同，因此没有用它的 wall time 计算本策略端到端 speedup。
+
+### 4.1 Velocity Cache v1 标准五任务结果
+
+固定配置：4-step UniPC、`shift=5`、guidance=3、policy seed `579362556`、每任务 1 episode、eager 模式、viewport 录制。任务集合与此前五任务策略对比保持一致。
+
+| Task | Success | Episode steps | Policy requests | Policy inference (s) | Generation / request (s) | ROI tokens / future frame |
+|---|---:|---:|---:|---:|---:|---:|
+| BananaInBowlTask | 1/1 | 414 | 13 | 36.406 | 0.748 | 191.2 |
+| BananaOnPlateTask | 1/1 | 116 | 4 | 12.309 | 0.721 | 190.2 |
+| RubiksCubeTask | 1/1 | 519 | 17 | 34.440 | 0.709 | 175.8 |
+| RubiksCubeAndBananaTask | 1/1 | 467 | 15 | 28.185 | 0.712 | 184.1 |
+| RubiksCubeLeftOfBowlTask | 0/1 | 450 | 15 | 24.317 | 0.717 | 186.5 |
+| **TOTAL / mean** | **4/5** | **1966** | **64** | **135.657** | **0.720** | **184.3** |
+
+失败项 `RubiksCubeLeftOfBowlTask` 在 450-step timeout 时得分为 `0.667`：机器人操作了方块，但最终没有满足“方块位于碗左侧”的空间关系。其余四项均完成全部 subtask。
+
+64 个 policy request 的 token/时间汇总：
+
+- 固定 ROI：平均 `184.28/340`，范围 `165–199`；
+- B4–B27 sparse call：GEN token 平均 `1847.25/3093`，保留 `59.72%`；
+- 每个 sparse block 平均节省 `1245.75` GEN token；
+- 计入 step 0 全量和 step 1–3 的 B0–B3 全量后，平均到所有 block call 节省 `800.84/3093`，即 `25.89%`；
+- generation wall：mean `0.720s`，median `0.716s`，范围 `0.696–1.041s`；首个 request 包含冷启动影响；
+- 五任务 RoboLab wall total 合计 `480.878s`，包含仿真、渲染与视频写入，不能当作纯 DiT 时间。
+
+本轮只有每任务一个 episode。`4/5` 是 v1 的当前观测结果，不代表置信充分的稳定成功率。
+
+输出：
+
+- RoboLab episode、HDF5 与五个 viewport 视频：`/root/robolab/RoboLab/output/velocity_cache_v1_shift5_5tasks_v1/`；
+- 64 个 request 的 ROI、token、velocity cache 与 timing artifact：`/root/robolab/experiments/preliminary/sparsity/velocity_cache/velocity_cache_v1_shift5_5tasks_v1/server/`；
+- 服务端总表：上述 server 目录中的 `aggregate.json`。
 
 ## 5. 输出目录
 
