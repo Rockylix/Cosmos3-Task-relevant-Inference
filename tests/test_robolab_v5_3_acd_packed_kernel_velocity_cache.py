@@ -5,6 +5,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from cosmos_framework.scripts.action_policy_server_robolab_v5_3_acd_packed_kernel import (
+    V53ServerArgs,
+    _percentile,
+)
 from cosmos_framework.scripts.robolab_grouped_temporal_closed_roi_velocity_cache import (
     GroupedTemporalClosedVelocityCacheSampler,
 )
@@ -31,6 +35,14 @@ def test_searchsorted_subset_handles_empty_target() -> None:
     result = subset_local_positions_searchsorted(torch, active, target)
     assert result.dtype == torch.long
     assert result.numel() == 0
+
+
+def test_v53_closed_loop_defaults_and_percentile() -> None:
+    args = V53ServerArgs()
+    assert args.ablation_mode == "c"
+    assert (args.roi_tokens_g1, args.roi_tokens_g2, args.roi_tokens_g3) == (192, 160, 144)
+    assert _percentile([], 0.9) is None
+    assert _percentile([1.0, 2.0, 3.0], 0.9) == pytest.approx(2.8)
 
 
 def test_v53_fast_velocity_sampler_matches_instrumented_v52_sampler() -> None:

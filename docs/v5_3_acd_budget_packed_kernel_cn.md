@@ -131,6 +131,26 @@ ac_budget_packed_kernel_shift5_BananaInBowlTask_c3_k80_nsys_v1/
   stats_cuda_gpu_kern_sum.csv
 ```
 
+## K80 单任务闭环核对
+
+在同一 `BananaInBowlTask` 上对 Dense/A/C/D 各运行一个固定初始化的闭环 episode：环境 seed `0`，policy seed `579362556`，shift=5，4 个 UniPC step，compile/CUDA graph 关闭。A/C/D 都使用 K80 预算 `192/160/144`。服务端每次 request 均在 generation 前后执行 CUDA synchronize；下表的 chunk 时间排除第一个冷请求。
+
+| Arm | 闭环结果 | Episode steps | 完成原因 | Warm requests | Generation median (s) | P90 (s) | Speedup vs Dense | 全 block-call GEN retention |
+|---|---:|---:|---|---:|---:|---:|---:|---:|
+| Dense | 1/1 | 158 | 完成 pick-and-place | 4 | 0.862264 | 0.872218 | 1.000x | 100.00% |
+| A | 0/1 | 750 | 未抓起香蕉，timeout | 23 | 0.682125 | 0.692380 | 1.264x | 70.96% |
+| C | 1/1 | 172 | 完成 pick-and-place | 5 | 0.680688 | 0.686469 | 1.267x | 70.96% |
+| D | 1/1 | 172 | 完成 pick-and-place | 5 | 0.687214 | 0.699026 | 1.255x | 70.96% |
+
+这里的 `1/1` 只是同一 seed 的单次闭环观测，不能解释为稳定成功率。A 的单 chunk action cosine 虽高，但闭环仍因抓取偏差失败，说明固定 chunk 误差不足以替代闭环评估。C、D 在本次配对观测中均成功，且维持约 `1.26x` 的暖态 generation 加速。
+
+完整数值、原始服务端 request 计时和视频位于：
+
+```text
+/root/robolab/experiments/preliminary/sparsity/velocity_cache/
+acd_packed_kernel_k80_BananaInBowlTask_seed579362556_v1/
+```
+
 ## 复现命令
 
 K80 完整 reference/optimized 等价性与稳定计时：
@@ -163,4 +183,3 @@ cd /root/robolab/worktrees/ac-budget-packed-kernel-v5-3
   tests/test_robolab_v5_2_motion_core_stable_adaptive.py \
   tests/test_robolab_grouped_temporal_closed_roi_velocity_cache.py
 ```
-
