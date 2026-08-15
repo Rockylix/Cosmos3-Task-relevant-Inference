@@ -46,6 +46,7 @@ def action_aligned_future_raw_profiles(
     k_gen: Any,
     scaling: float,
     token_layout: Mapping[str, Any],
+    validate: bool = True,
 ) -> Any:
     """Return raw Action-aligned future attention, shape ``[8, spatial]``.
 
@@ -74,7 +75,7 @@ def action_aligned_future_raw_profiles(
     k = k.repeat_interleave(q_heads // kv_heads, dim=1).permute(1, 0, 2).contiguous()
     probabilities = torch.softmax(torch.matmul(q, k.transpose(1, 2)) * float(scaling), dim=-1)
     head_mean = probabilities.mean(dim=0)
-    if not bool(torch.isfinite(head_mean).all()):
+    if validate and not bool(torch.isfinite(head_mean).all()):
         raise RuntimeError("V5.2 Action attention profile contains NaN/Inf")
 
     num_ar = int(k_ar.shape[0])
@@ -84,7 +85,7 @@ def action_aligned_future_raw_profiles(
         positions = torch.tensor(token_layout["latent_positions"][f"L{latent}"], dtype=torch.long, device=q_gen.device)
         profiles.append(head_mean[horizons].index_select(-1, positions + num_ar).mean(dim=0))
     result = torch.stack(profiles)
-    if not bool(torch.isfinite(result).all()) or bool((result < 0).any()):
+    if validate and (not bool(torch.isfinite(result).all()) or bool((result < 0).any())):
         raise RuntimeError("V5.2 raw attention profile is invalid")
     return result
 
