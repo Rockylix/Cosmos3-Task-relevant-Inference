@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Visualize V5 raw, temporal-closed, and depth-nested ROI masks."""
+"""Visualize V5.1 score-smoothed, budgeted execution ROI masks."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-STAGES = ("raw_masks", "closed_masks", "execution_masks")
+STAGES = ("execution_masks",)
 
 
 def _jaccard(left: torch.Tensor, right: torch.Tensor) -> float:
@@ -61,7 +61,7 @@ def main() -> None:
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     artifact = torch.load(args.artifact, map_location="cpu", weights_only=True)
-    scores = artifact["grouped_scores"].float()
+    scores = artifact["normalized_scores"].float()
     rows = []
     summary = {}
     for stage in STAGES:
@@ -104,7 +104,7 @@ def main() -> None:
                 _plot_overlay(
                     masks[group],
                     args.frames_dir,
-                    f"V5 execution ROI overlay | G{group + 1}",
+                    f"V5.1 execution ROI overlay | G{group + 1}",
                     args.output_dir / f"execution_overlay_g{group + 1}.png",
                 )
         summary[stage] = stage_summary

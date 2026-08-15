@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""Grouped, temporally closed ROI sparsity with a step-0 velocity cache.
+"""Grouped, score-smoothed budgeted ROI sparsity with a step-0 velocity cache.
 
-Step 0 is dense.  Its post-RoPE Action-Q/Future-K profiles produce one mask
-per block group and future latent.  A radius-one temporal closure discourages
-adjacent latent frames from switching abruptly between current and cached
-denoising.  Masks are nested over depth, so a token may leave the active
-sequence at B12 or B20 but can never re-enter without the missing block state.
+Step 0 is dense.  Its post-RoPE Action-Q/Future-K profiles produce one score
+map per block group and future latent.  Scores, rather than binary masks, are
+smoothed over adjacent future latents.  Fixed per-group budgets make the
+effective sequence lengths predictable.  Subset-constrained ranking nests the
+masks over depth, so a token may leave the active sequence at B12 or B20 but
+can never re-enter without the missing block state.
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from cosmos_framework.data.generator.sequence_packing.runtime import get_gen_seq
-from cosmos_framework.scripts.robolab_action_attention_mass90_intervention import minimum_mass_mask
 from cosmos_framework.scripts.robolab_step0_fixed_roi_velocity_cache import (
     GuidedBackgroundVelocityCacheSampler,
     Step0FixedROISparseController,
@@ -27,8 +27,30 @@ from cosmos_framework.scripts.robolab_step0_fixed_roi_velocity_cache import (
     expand_token_roi_to_velocity_grid,
 )
 
-VELOCITY_CACHE_STRATEGY_VERSION = "v5"
+VELOCITY_CACHE_STRATEGY_VERSION = "v5.1"
 DEFAULT_BLOCK_GROUPS = ((4, 11), (12, 19), (20, 27))
+DEFAULT_GROUP_TOKEN_BUDGETS = (240, 200, 180)
+DEFAULT_TEMPORAL_SCORE_WEIGHTS = (0.25, 0.5, 0.25)
+DEFAULT_DEPTH_LOOKAHEAD_DECAY = 0.5
+
+
+def _topk_mask(torch: Any, scores: Any, budget: int, allowed: Any | None = None) -> Any:
+    """Select exactly ``budget`` entries, optionally inside an allowed subset."""
+
+    if scores.ndim != 1:
+        raise ValueError(f"Expected one-dimensional scores, got {tuple(scores.shape)}")
+    if allowed is None:
+        candidates = torch.arange(scores.numel(), device=scores.device)
+    else:
+        if allowed.shape != scores.shape or allowed.dtype != torch.bool:
+            raise ValueError("allowed must be a boolean mask matching scores")
+        candidates = torch.nonzero(allowed, as_tuple=False).flatten()
+    if not 0 < budget <= int(candidates.numel()):
+        raise ValueError(f"budget={budget} does not fit {int(candidates.numel())} candidates")
+    chosen_local = torch.topk(scores.index_select(0, candidates), k=budget, sorted=False).indices
+    mask = torch.zeros_like(scores, dtype=torch.bool)
+    mask[candidates.index_select(0, chosen_local)] = True
+    return mask
 
 
 def build_grouped_temporal_closed_masks(
@@ -37,8 +59,11 @@ def build_grouped_temporal_closed_masks(
     profile_records: Sequence[Mapping[str, Any]],
     block_groups: Sequence[tuple[int, int]],
     threshold: float,
+    token_budgets: Sequence[int] = DEFAULT_GROUP_TOKEN_BUDGETS,
+    temporal_weights: tuple[float, float, float] = DEFAULT_TEMPORAL_SCORE_WEIGHTS,
+    depth_lookahead_decay: float = DEFAULT_DEPTH_LOOKAHEAD_DECAY,
 ) -> tuple[Any, Any, Any, Any]:
-    """Build raw, temporal-closed, and depth-nested masks.
+    """Build score-smoothed, fixed-budget, depth-nested masks.
 
     Each record contains a ``profiles`` tensor shaped ``[8, spatial]``.  Scores
     are max-aggregated only over CFG branches and blocks inside one block group;
@@ -48,8 +73,7 @@ def build_grouped_temporal_closed_masks(
 
     if not profile_records:
         raise ValueError("At least one step-0 profile record is required")
-    if not 0.0 < threshold <= 1.0:
-        raise ValueError("threshold must be in (0,1]")
+    del threshold  # Kept in the public signature for old experiment callers.
     first = profile_records[0]["profiles"]
     if first.ndim != 2 or int(first.shape[0]) != 8:
         raise ValueError(f"Expected profile shape [8,spatial], got {tuple(first.shape)}")
@@ -65,23 +89,79 @@ def build_grouped_temporal_closed_masks(
             raise RuntimeError("Step-0 profile geometry changed inside a block group")
         scores[group_index] = torch.stack(members).amax(dim=0)
 
-    raw_masks = minimum_mass_mask(scores.reshape(-1, spatial), threshold).reshape_as(scores)
+    return build_grouped_score_smoothed_budgeted_masks(
+        torch=torch,
+        scores=scores,
+        token_budgets=token_budgets,
+        temporal_weights=temporal_weights,
+        depth_lookahead_decay=depth_lookahead_decay,
+    )
 
-    closed_masks = raw_masks.clone()
-    for frame in range(8):
-        lo = max(0, frame - 1)
-        hi = min(8, frame + 2)
-        closed_masks[:, frame] = raw_masks[:, lo:hi].any(dim=1)
 
-    execution_masks = closed_masks.clone()
-    running = torch.zeros_like(closed_masks[0])
-    for group_index in reversed(range(len(block_groups))):
-        running = running | closed_masks[group_index]
-        execution_masks[group_index] = running
+def build_grouped_score_smoothed_budgeted_masks(
+    *,
+    torch: Any,
+    scores: Any,
+    token_budgets: Sequence[int],
+    temporal_weights: tuple[float, float, float] = DEFAULT_TEMPORAL_SCORE_WEIGHTS,
+    depth_lookahead_decay: float = DEFAULT_DEPTH_LOOKAHEAD_DECAY,
+) -> tuple[Any, Any, Any, Any]:
+    """Build V5.1 masks from already aggregated ``[group,8,spatial]`` scores.
 
-    if not bool(torch.isfinite(scores).all()):
-        raise RuntimeError("Grouped ROI scores contain NaN/Inf")
-    return scores, raw_masks, closed_masks, execution_masks
+    Returns normalized scores, temporally smoothed scores, future-aware depth
+    scores, and exact-budget execution masks.  The execution masks are nested:
+    every deeper mask is selected only from the preceding shallower mask.
+    """
+
+    if scores.ndim != 3 or int(scores.shape[1]) != 8:
+        raise ValueError(f"Expected scores [group,8,spatial], got {tuple(scores.shape)}")
+    groups, frames, spatial = map(int, scores.shape)
+    budgets = tuple(int(value) for value in token_budgets)
+    if len(budgets) != groups:
+        raise ValueError(f"Expected {groups} token budgets, got {budgets}")
+    if any(not 0 < budget <= spatial for budget in budgets):
+        raise ValueError(f"Budgets must be in [1,{spatial}], got {budgets}")
+    if any(budgets[index] < budgets[index + 1] for index in range(groups - 1)):
+        raise ValueError("Token budgets must be non-increasing to preserve nested masks")
+    left, center, right = map(float, temporal_weights)
+    if min(left, center, right) < 0.0 or left + center + right <= 0.0:
+        raise ValueError(f"Invalid temporal weights {temporal_weights}")
+    if not 0.0 <= depth_lookahead_decay <= 1.0:
+        raise ValueError("depth_lookahead_decay must be in [0,1]")
+    if not bool(torch.isfinite(scores).all()) or bool((scores < 0).any()):
+        raise RuntimeError("Grouped ROI scores must be finite and non-negative")
+
+    normalized = scores / scores.sum(dim=-1, keepdim=True).clamp_min(torch.finfo(scores.dtype).eps)
+    smoothed = torch.empty_like(normalized)
+    weights = (left, center, right)
+    for frame in range(frames):
+        numerator = torch.zeros_like(normalized[:, frame])
+        denominator = 0.0
+        for offset, weight in zip((-1, 0, 1), weights, strict=True):
+            neighbor = frame + offset
+            if 0 <= neighbor < frames and weight > 0.0:
+                numerator = numerator + weight * normalized[:, neighbor]
+                denominator += weight
+        smoothed[:, frame] = numerator / denominator
+
+    depth_scores = torch.empty_like(smoothed)
+    for group in range(groups):
+        combined = torch.zeros_like(smoothed[group])
+        for later_group in range(group, groups):
+            combined = combined + depth_lookahead_decay ** (later_group - group) * smoothed[later_group]
+        depth_scores[group] = combined
+
+    execution_masks = torch.zeros_like(scores, dtype=torch.bool)
+    for frame in range(frames):
+        allowed = None
+        for group in range(groups):
+            selected = _topk_mask(torch, depth_scores[group, frame], budgets[group], allowed)
+            execution_masks[group, frame] = selected
+            allowed = selected
+
+    if not bool(torch.isfinite(smoothed).all()) or not bool(torch.isfinite(depth_scores).all()):
+        raise RuntimeError("V5.1 mask scores contain NaN/Inf")
+    return normalized, smoothed, depth_scores, execution_masks
 
 
 def grouped_roi_original_positions(
@@ -181,6 +261,9 @@ class GroupedTemporalClosedROISparseController(Step0FixedROISparseController):
         num_steps: int,
         threshold: float = 0.9,
         block_groups: Sequence[tuple[int, int]] = DEFAULT_BLOCK_GROUPS,
+        token_budgets: Sequence[int] = DEFAULT_GROUP_TOKEN_BUDGETS,
+        temporal_weights: tuple[float, float, float] = DEFAULT_TEMPORAL_SCORE_WEIGHTS,
+        depth_lookahead_decay: float = DEFAULT_DEPTH_LOOKAHEAD_DECAY,
         output_dir: Path | None = None,
     ) -> None:
         groups = tuple((int(start), int(end)) for start, end in block_groups)
@@ -199,10 +282,15 @@ class GroupedTemporalClosedROISparseController(Step0FixedROISparseController):
             output_dir=output_dir,
         )
         self.block_groups = groups
+        self.token_budgets = tuple(int(value) for value in token_budgets)
+        if len(self.token_budgets) != len(groups):
+            raise ValueError(f"Expected {len(groups)} token budgets, got {self.token_budgets}")
+        self.temporal_weights = tuple(float(value) for value in temporal_weights)
+        self.depth_lookahead_decay = float(depth_lookahead_decay)
         self.profile_records: list[dict[str, Any]] = []
-        self.grouped_scores: Any | None = None
-        self.raw_masks: Any | None = None
-        self.closed_masks: Any | None = None
+        self.normalized_scores: Any | None = None
+        self.smoothed_scores: Any | None = None
+        self.depth_scores: Any | None = None
         self.execution_masks: Any | None = None
 
     def _capture_step0_profile(
@@ -219,9 +307,9 @@ class GroupedTemporalClosedROISparseController(Step0FixedROISparseController):
     ) -> None:
         del v_ar, v_gen, attn_output_gen
         if self._current is None or self._layout is None or self._profile_callback_block is None:
-            raise RuntimeError("V5 profile callback has no live context")
+            raise RuntimeError("V5.1 profile callback has no live context")
         if layer_index != self._profile_callback_block:
-            raise RuntimeError(f"V5 profile callback expected B{self._profile_callback_block}, got B{layer_index}")
+            raise RuntimeError(f"V5.1 profile callback expected B{self._profile_callback_block}, got B{layer_index}")
         profiles = (
             action_aligned_future_spatial_profiles(
                 torch=self.torch,
@@ -261,13 +349,16 @@ class GroupedTemporalClosedROISparseController(Step0FixedROISparseController):
             return
         expected = (1 if self.guidance == 1.0 else 2) * sum(end - start + 1 for start, end in self.block_groups)
         if len(self.profile_records) != expected:
-            raise RuntimeError(f"Expected {expected} V5 step-0 profiles, got {len(self.profile_records)}")
-        self.grouped_scores, self.raw_masks, self.closed_masks, self.execution_masks = (
+            raise RuntimeError(f"Expected {expected} V5.1 step-0 profiles, got {len(self.profile_records)}")
+        self.normalized_scores, self.smoothed_scores, self.depth_scores, self.execution_masks = (
             build_grouped_temporal_closed_masks(
                 torch=self.torch,
                 profile_records=self.profile_records,
                 block_groups=self.block_groups,
                 threshold=self.threshold,
+                token_budgets=self.token_budgets,
+                temporal_weights=self.temporal_weights,
+                depth_lookahead_decay=self.depth_lookahead_decay,
             )
         )
 
@@ -288,7 +379,7 @@ class GroupedTemporalClosedROISparseController(Step0FixedROISparseController):
         gen_only: bool,
     ) -> tuple[Any, dict[str, Any], Any]:
         if self._current is None:
-            raise RuntimeError("V5 run_layer has no active forward")
+            raise RuntimeError("V5.1 run_layer has no active forward")
         step = int(self._current["step"])
         if step == 0 or block < self.first_sparse_block:
             return super().run_layer(
@@ -300,9 +391,9 @@ class GroupedTemporalClosedROISparseController(Step0FixedROISparseController):
                 gen_only=gen_only,
             )
         if self.execution_masks is None or self._layout is None:
-            raise RuntimeError("Later denoise step started before V5 masks were finalized")
+            raise RuntimeError("Later denoise step started before V5.1 masks were finalized")
         if self._position_embeddings is None or self._active_original_positions is None or self._side_buffer is None:
-            raise RuntimeError("V5 sparse stack state is incomplete")
+            raise RuntimeError("V5.1 sparse stack state is incomplete")
 
         group_index = self._group_index(block)
         group_start = self.block_groups[group_index][0]
@@ -331,7 +422,7 @@ class GroupedTemporalClosedROISparseController(Step0FixedROISparseController):
         )
         sparse_gen = get_gen_seq(output)
         if int(sparse_gen.shape[0]) != int(self._active_original_positions.numel()):
-            raise RuntimeError("V5 sparse block output length changed")
+            raise RuntimeError("V5.1 sparse block output length changed")
         self._side_buffer.index_copy_(0, self._active_original_positions, sparse_gen)
         original_gen = int(self._layout["num_gen_tokens"])
         frame_counts = [int(mask.sum()) for mask in self.execution_masks[group_index]]
@@ -340,7 +431,7 @@ class GroupedTemporalClosedROISparseController(Step0FixedROISparseController):
             {
                 **self._current,
                 "block": block,
-                "mode": "grouped_temporal_closed_sparse",
+                "mode": "grouped_score_smoothed_budgeted_sparse",
                 "block_group": group_index,
                 "future_tokens_by_frame": frame_counts,
                 "gen_tokens_before": retained,
@@ -356,16 +447,17 @@ class GroupedTemporalClosedROISparseController(Step0FixedROISparseController):
         expected_stacks = self.num_steps if self.guidance == 1.0 else 2 * self.num_steps
         expected_blocks = expected_stacks * len(self.layers)
         if self.stack_active or any(
-            item is None for item in (self.grouped_scores, self.raw_masks, self.closed_masks, self.execution_masks)
+            item is None
+            for item in (self.normalized_scores, self.smoothed_scores, self.depth_scores, self.execution_masks)
         ):
-            raise RuntimeError("V5 experiment did not complete")
+            raise RuntimeError("V5.1 experiment did not complete")
         if self._completed_stacks != expected_stacks or len(self._block_rows) != expected_blocks:
             raise RuntimeError(
-                f"Incomplete V5 stacks={self._completed_stacks}/{expected_stacks}, "
+                f"Incomplete V5.1 stacks={self._completed_stacks}/{expected_stacks}, "
                 f"blocks={len(self._block_rows)}/{expected_blocks}"
             )
         if not all(bool(row["finite"]) for row in self._block_rows):
-            raise RuntimeError("V5 sparse output contains NaN/Inf")
+            raise RuntimeError("V5.1 sparse output contains NaN/Inf")
         assert self._layout is not None and self.execution_masks is not None
         full_gen = int(self._layout["num_gen_tokens"])
         group_rows = []
@@ -384,16 +476,20 @@ class GroupedTemporalClosedROISparseController(Step0FixedROISparseController):
                     "gen_retained_ratio": retained / full_gen,
                 }
             )
-        sparse_rows = [row for row in self._block_rows if row["mode"] == "grouped_temporal_closed_sparse"]
+        sparse_rows = [row for row in self._block_rows if row["mode"] == "grouped_score_smoothed_budgeted_sparse"]
         summary = {
             "schema_version": 1,
             "strategy_version": VELOCITY_CACHE_STRATEGY_VERSION,
-            "experiment": "grouped_temporal_closed_roi_guided_background_velocity_cache",
-            "threshold": self.threshold,
+            "experiment": "grouped_score_smoothed_budgeted_roi_guided_background_velocity_cache",
+            "legacy_threshold_unused": self.threshold,
             "aggregation": "max over step0 CFG branch x blocks within group; future frames separate",
             "block_groups": [list(group) for group in self.block_groups],
-            "temporal_closure_radius": 1,
+            "token_budgets": list(self.token_budgets),
+            "temporal_score_weights": list(self.temporal_weights),
+            "depth_lookahead_decay": self.depth_lookahead_decay,
+            "temporal_binary_mask_union": False,
             "depth_nested": True,
+            "depth_binary_mask_union": False,
             "token_reentry_allowed": False,
             "step0_all_blocks_dense": True,
             "later_dense_blocks": list(range(self.first_sparse_block)),
@@ -414,12 +510,12 @@ class GroupedTemporalClosedROISparseController(Step0FixedROISparseController):
             self.torch.save(
                 {
                     "profiles": self.torch.stack(self._profile_tensors),
-                    "grouped_scores": self.grouped_scores,
-                    "raw_masks": self.raw_masks,
-                    "closed_masks": self.closed_masks,
+                    "normalized_scores": self.normalized_scores,
+                    "smoothed_scores": self.smoothed_scores,
+                    "depth_scores": self.depth_scores,
                     "execution_masks": self.execution_masks,
                 },
-                self.output_dir / "step0_grouped_temporal_closed_roi.pt",
+                self.output_dir / "step0_grouped_score_smoothed_budgeted_roi.pt",
             )
             with (self.output_dir / "step0_profile_rows.csv").open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=list(self._profile_rows[0]))
@@ -437,7 +533,7 @@ class GroupedTemporalClosedROISparseController(Step0FixedROISparseController):
 
 
 class GroupedTemporalClosedVelocityCacheSampler(GuidedBackgroundVelocityCacheSampler):
-    """Merge frame-local current ROI and cached step-0 background before UniPC."""
+    """Merge V5.1 frame-local current ROI and cached step-0 background before UniPC."""
 
     controller: GroupedTemporalClosedROISparseController
 
@@ -452,7 +548,7 @@ class GroupedTemporalClosedVelocityCacheSampler(GuidedBackgroundVelocityCacheSam
             nonlocal step
             current = velocity_fn(noise_x, timestep)
             if self.controller.vision_shape is None or self.controller.execution_masks is None:
-                raise RuntimeError("V5 controller did not expose vision shape/masks after guided velocity")
+                raise RuntimeError("V5.1 controller did not expose vision shape/masks after guided velocity")
             vision_numel = 1
             for value in self.controller.vision_shape:
                 vision_numel *= int(value)
@@ -475,7 +571,7 @@ class GroupedTemporalClosedVelocityCacheSampler(GuidedBackgroundVelocityCacheSam
                     }
                 else:
                     if self.controller._layout is None:
-                        raise RuntimeError("V5 controller token layout is unavailable")
+                        raise RuntimeError("V5.1 controller token layout is unavailable")
                     _, token_h, token_w = self.controller._layout["latent_shape_thw"]
                     velocity_roi = expand_grouped_token_roi_to_velocity_grid(
                         torch=self.controller.torch,
@@ -502,7 +598,7 @@ class GroupedTemporalClosedVelocityCacheSampler(GuidedBackgroundVelocityCacheSam
                         self.controller.torch, reference, flat_velocity
                     )
             if not all(bool(self.controller.torch.isfinite(item).all()) for item in output):
-                raise RuntimeError("V5 cached velocity output contains NaN/Inf")
+                raise RuntimeError("V5.1 cached velocity output contains NaN/Inf")
             self.velocities.append([item.detach().clone() for item in output])
             self.timesteps.append(float(timestep.reshape(-1)[0]))
             self.cache_trace.append(step_record)
@@ -512,5 +608,5 @@ class GroupedTemporalClosedVelocityCacheSampler(GuidedBackgroundVelocityCacheSam
         result = self.inner(cached, initial_noise, **kwargs)
         expected = int(kwargs.get("num_steps", self.controller.num_steps))
         if step != expected:
-            raise RuntimeError(f"Expected {expected} V5 guided velocity calls, got {step}")
+            raise RuntimeError(f"Expected {expected} V5.1 guided velocity calls, got {step}")
         return result

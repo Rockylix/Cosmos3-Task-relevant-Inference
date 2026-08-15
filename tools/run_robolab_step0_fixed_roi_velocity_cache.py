@@ -181,7 +181,14 @@ def main() -> None:
     parser.add_argument("--shift", type=float, default=5.0)
     parser.add_argument("--threshold", type=float, default=0.9)
     parser.add_argument("--first-sparse-block", type=int, default=4)
-    parser.add_argument("--strategy-version", choices=("v1", "v5"), default="v1")
+    parser.add_argument("--strategy-version", choices=("v1", "v5.1"), default="v1")
+    parser.add_argument(
+        "--group-token-budgets",
+        type=int,
+        nargs=3,
+        metavar=("G1", "G2", "G3"),
+        default=(240, 200, 180),
+    )
     args = parser.parse_args()
     args.output_root = args.output_root.expanduser().absolute()
     args.checkpoint = args.checkpoint.expanduser().absolute()
@@ -227,13 +234,14 @@ def main() -> None:
         )
     else:
         if args.first_sparse_block != 4:
-            raise ValueError("V5 uses fixed block groups B4-B11/B12-B19/B20-B27")
+            raise ValueError("V5.1 uses fixed block groups B4-B11/B12-B19/B20-B27")
         controller = GroupedTemporalClosedROISparseController(
             torch=torch,
             net=service.model.net,
             guidance=args.guidance,
             num_steps=args.num_steps,
             threshold=args.threshold,
+            token_budgets=args.group_token_budgets,
             output_dir=args.output_root / "controller",
         )
         sparse_sampler = GroupedTemporalClosedVelocityCacheSampler(
@@ -320,6 +328,7 @@ def main() -> None:
                 "threshold": args.threshold,
                 "first_sparse_block": args.first_sparse_block,
                 "strategy_version": args.strategy_version,
+                "group_token_budgets": list(args.group_token_budgets),
                 "compile": False,
                 "cuda_graphs": False,
                 "paired_input_and_rng": True,
