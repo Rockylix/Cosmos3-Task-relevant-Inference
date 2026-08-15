@@ -22,6 +22,10 @@ from cosmos_framework.scripts.action_policy_server_robolab import (
     RobolabServerArgs,
     _build_data_batch_from_sample,
 )
+from cosmos_framework.scripts.robolab_grouped_temporal_closed_roi_velocity_cache import (
+    GroupedTemporalClosedROISparseController,
+    GroupedTemporalClosedVelocityCacheSampler,
+)
 from cosmos_framework.scripts.robolab_step0_fixed_roi_velocity_cache import (
     GuidedBackgroundVelocityCacheSampler,
     GuidedVelocityTraceSampler,
@@ -107,9 +111,7 @@ def _make_data_batch(service: RobolabPolicyService, args: argparse.Namespace) ->
     observation = {
         "observation/image": image,
         "observation/joint_position": joint[:7][None, :],
-        "observation/gripper_position": np.asarray(
-            [[joint[args.finger_joint_index] / (np.pi / 4)]], dtype=np.float32
-        ),
+        "observation/gripper_position": np.asarray([[joint[args.finger_joint_index] / (np.pi / 4)]], dtype=np.float32),
         "prompt": args.prompt,
     }
     return _build_data_batch_from_sample(service._build_sample(observation))
@@ -179,6 +181,7 @@ def main() -> None:
     parser.add_argument("--shift", type=float, default=5.0)
     parser.add_argument("--threshold", type=float, default=0.9)
     parser.add_argument("--first-sparse-block", type=int, default=4)
+    parser.add_argument("--strategy-version", choices=("v1", "v5"), default="v1")
     args = parser.parse_args()
     args.output_root = args.output_root.expanduser().absolute()
     args.checkpoint = args.checkpoint.expanduser().absolute()
@@ -207,21 +210,38 @@ def main() -> None:
     with torch.inference_mode():
         baseline, baseline_wall_s = _generate(service, data_batch, args, baseline_sampler)
 
-    controller = Step0FixedROISparseController(
-        torch=torch,
-        net=service.model.net,
-        guidance=args.guidance,
-        num_steps=args.num_steps,
-        threshold=args.threshold,
-        first_sparse_block=args.first_sparse_block,
-        output_dir=args.output_root / "controller",
-    )
-    sparse_sampler = GuidedBackgroundVelocityCacheSampler(
-        service.model.sampler,
-        controller,
-        reference_velocities=baseline_sampler.velocities,
-    )
-    print("[sparse] step0 dense profile + fixed ROI + step0 background velocity", flush=True)
+    if args.strategy_version == "v1":
+        controller = Step0FixedROISparseController(
+            torch=torch,
+            net=service.model.net,
+            guidance=args.guidance,
+            num_steps=args.num_steps,
+            threshold=args.threshold,
+            first_sparse_block=args.first_sparse_block,
+            output_dir=args.output_root / "controller",
+        )
+        sparse_sampler = GuidedBackgroundVelocityCacheSampler(
+            service.model.sampler,
+            controller,
+            reference_velocities=baseline_sampler.velocities,
+        )
+    else:
+        if args.first_sparse_block != 4:
+            raise ValueError("V5 uses fixed block groups B4-B11/B12-B19/B20-B27")
+        controller = GroupedTemporalClosedROISparseController(
+            torch=torch,
+            net=service.model.net,
+            guidance=args.guidance,
+            num_steps=args.num_steps,
+            threshold=args.threshold,
+            output_dir=args.output_root / "controller",
+        )
+        sparse_sampler = GroupedTemporalClosedVelocityCacheSampler(
+            service.model.sampler,
+            controller,
+            reference_velocities=baseline_sampler.velocities,
+        )
+    print(f"[sparse] strategy={args.strategy_version} step0-profile ROI + velocity cache", flush=True)
     with controller, torch.inference_mode():
         sparse, sparse_wall_s = _generate(service, data_batch, args, sparse_sampler)
     controller_summary = controller.finish()
@@ -299,6 +319,7 @@ def main() -> None:
                 "shift": args.shift,
                 "threshold": args.threshold,
                 "first_sparse_block": args.first_sparse_block,
+                "strategy_version": args.strategy_version,
                 "compile": False,
                 "cuda_graphs": False,
                 "paired_input_and_rng": True,
