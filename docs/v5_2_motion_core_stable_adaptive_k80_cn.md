@@ -182,12 +182,137 @@ Raw attention-mass retention mean（G1/G2/G3）：
 
 D 总计记录 `458` 次 forced replacement；569 个 threshold proposal 中接受 125 个、拒绝 444 个。
 
+## 五任务闭环筛选
+
+闭环固定：
+
+- policy seed：`579362556`，每个 request 都重置为相同 seed；
+- RoboLab environment seed：`0`；
+- prompt：官方 JSON 格式，所有 arm 都显式传入 `--format-prompt-as-json True`；
+- shift：`5`，UniPC steps：`4`；
+- compile/CUDA graph：关闭；
+- 每个 arm、每个 task：一个 episode；
+- viewport 视频：开启。
+
+任务集合为：
+
+```text
+BananaInBowlTask
+BananaOnPlateTask
+RubiksCubeTask
+RubiksCubeAndBananaTask
+RubiksCubeLeftOfBowlTask
+```
+
+成功严格读取 `episode_results.jsonl` 的 `success` 布尔字段，不用 `score` 代替。
+
+| Arm | 成功数 | 成功率 | Warm chunk median (s) | P90 (s) | 相对 Dense | 全 block-call GEN token 保留率 |
+|---|---:|---:|---:|---:|---:|---:|
+| Dense | 3/5 | 60.0% | 0.8695 | 0.8778 | 1.000x | 100.00% |
+| A | 3/5 | 60.0% | 0.7308 | 0.7438 | 1.190x | 70.96% |
+| B | 2/5 | 40.0% | 0.7283 | 0.7402 | 1.194x | 70.96% |
+| C | 4/5 | 80.0% | 0.7266 | 0.7350 | 1.197x | 70.96% |
+| D | 3/5 | 60.0% | 0.7282 | 0.7372 | 1.194x | 70.96% |
+
+逐任务结果：
+
+| Task | Dense | A | B | C | D |
+|---|:---:|:---:|:---:|:---:|:---:|
+| BananaInBowlTask | Y | Y | Y | Y | Y |
+| BananaOnPlateTask | Y | Y | Y | Y | N |
+| RubiksCubeTask | N | N | N | Y | Y |
+| RubiksCubeAndBananaTask | Y | Y | N | Y | Y |
+| RubiksCubeLeftOfBowlTask | N | N | N | N | N |
+
+稀疏臂在全 28 个 block call 上平均减少 `898.29 / 3093` 个 GEN token，即保留 `70.96%`。三个稀疏 group 的实际 GEN token 保留率分别为 `61.72%`、`53.44%`、`49.30%`。所有请求均通过 finite 检查，且 G3→G2、G2→G1 subset violation 为 `0`。
+
+服务命令（将 `MODE` 设为 `dense`、`a`、`b`、`c` 或 `d`）：
+
+```bash
+cd /root/robolab/worktrees/v5-2-motion-core-stable-adaptive-k80
+MODE=b
+HF_HOME=/root/cosmos3/cosmos/checkpoints/hf_home \
+HF_HUB_OFFLINE=1 \
+LD_LIBRARY_PATH='' \
+PYTHONPATH=$PWD \
+/root/cosmos3/cosmos/packages/cosmos3/.venv/bin/python \
+  -m cosmos_framework.scripts.action_policy_server_robolab_v5_2_motion_core_stable_adaptive \
+  --checkpoint-path /root/robolab/RoboLab/Cosmos3-Edge-Policy-DROID \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --seed 579362556 \
+  --deterministic-seed \
+  --format-prompt-as-json True \
+  --ablation-mode "$MODE" \
+  --intervention-output-dir \
+    "/root/robolab/experiments/preliminary/sparsity/velocity_cache/\
+v5_2_motion_core_stable_adaptive_k80_5tasks_seed579362556_json_v1/$MODE/server"
+```
+
+另一个终端运行 RoboLab：
+
+```bash
+cd /root/robolab/RoboLab
+MODE=b
+OMNI_KIT_ACCEPT_EULA=Y NO_PROXY=127.0.0.1,localhost \
+.venv/bin/python policies/cosmos3/run.py \
+  --remote-host 127.0.0.1 \
+  --remote-port 8000 \
+  --task BananaInBowlTask BananaOnPlateTask RubiksCubeTask \
+    RubiksCubeAndBananaTask RubiksCubeLeftOfBowlTask \
+  --num-envs 1 \
+  --num-runs 1 \
+  --output-folder-name \
+    "v5_2_k80_${MODE}_shift5_5tasks_seed579362556_json_v1" \
+  --video-mode viewport \
+  --headless
+```
+
+统一汇总：
+
+```bash
+cd /root/robolab/worktrees/v5-2-motion-core-stable-adaptive-k80
+LD_LIBRARY_PATH='' /root/cosmos3/cosmos/packages/cosmos3/.venv/bin/python \
+  -m tools.summarize_robolab_v5_2_closed_loop \
+  --experiment-root /root/robolab/experiments/preliminary/sparsity/velocity_cache/\
+v5_2_motion_core_stable_adaptive_k80_5tasks_seed579362556_json_v1 \
+  --robolab-output-root /root/robolab/RoboLab/output \
+  --seed 579362556 \
+  --dense-run-name v5_2_k80_dense_shift5_5tasks_seed579362556_v1 \
+  --sparse-run-suffix json_v1
+```
+
+闭环 CSV、中文报告和每个 request 的 token 数据位于：
+
+```text
+/root/robolab/experiments/preliminary/sparsity/velocity_cache/
+v5_2_motion_core_stable_adaptive_k80_5tasks_seed579362556_json_v1/
+```
+
+每个 arm 的五个 viewport MP4 位于：
+
+```text
+/root/robolab/RoboLab/output/
+v5_2_k80_<arm>_shift5_5tasks_seed579362556_json_v1/<task>/*_viewport.mp4
+```
+
+Dense 视频沿用已经完成、条件完全相同的：
+
+```text
+/root/robolab/RoboLab/output/
+v5_2_k80_dense_shift5_5tasks_seed579362556_v1/<task>/*_viewport.mp4
+```
+
+配对审计时曾产生一批没有显式开启 JSON prompt 的 A-D 结果，位于不带 `_json_` 的旧目录；它与 Dense 的输入格式不一致，已明确排除，不进入上述表格和最终结论。
+
 ## 当前结论边界
 
 1. Motion Core 轻微提高了部分 group 的 attention-mass retention，但没有在该 chunk 上降低 action/RGB 误差。
 2. 当前 Stable/Adaptive 配额使 C 的整体 temporal Jaccard 明显下降，而不是上升；说明 32 个逐帧 Adaptive token 足以引入较大变化。
 3. D 明显恢复了 temporal Jaccard，并略微改善 C 的 RGB/latent 指标，但 action MSE 没有改善。
-4. 单次 wall time 不是正式 benchmark，本实验也未运行闭环任务，不能据此声称成功率或稳定加速提升。
+4. 有效 JSON-prompt 五任务闭环中 Dense/A/B/C/D 为 `3/5`、`3/5`、`2/5`、`4/5`、`3/5`。A 与 Dense 的逐任务成败完全一致；C 在这个 seed 上最高，继续减 token 时应同时保留 A 和 C 两条基线。
+5. Warm chunk median 显示约 `1.20x` 端到端 generation 加速；这是本次同机 eager 闭环请求测量，不外推为其他硬件或 compile/CUDA graph 配置的稳定加速。
+6. 每个 task 只有一个固定 seed episode，因此 C 的 `4/5` 只比 Dense 多一个 episode，不能解释为成功率显著提升；这些数值是 pooled screening success，不是稳定的逐任务成功率估计。
 
 完整结果位于：
 
