@@ -159,6 +159,26 @@ ac_budget_packed_kernel_shift5_BananaInBowlTask_c3_k80_nsys_v1/
 
 四个预算下探 episode 都完成了任务，但不能只看二值成功：C/K70、D/K75、D/K70 分别需要 299、360、266 步，相对 K80 的 172 步明显变长。K80→K70 只把暖态 chunk 再缩短约 2.5%，而闭环轨迹已出现明显退化。因此当前单 seed 下 K75/C 是较平衡的候选；在继续下探 K65 前，应先对 K75/C 与 K80/C 做多 seed 验证。
 
+## C/D K80 九任务闭环
+
+按与历史 Baseline/Version1 相同的九任务列表和协议，固定环境 seed `0`、policy seed `579362556`，对 C/D K80 各运行每任务一个 episode。成功严格读取 `episode_results.jsonl` 的 `success` 字段。
+
+| Strategy | Success | Stable chunk median | Speedup vs same-run Dense |
+|---|---:|---:|---:|
+| Baseline（历史配对） | 3/9 | 0.8695 s（历史表） | 1.00x |
+| Version1（历史配对） | 5/9 | 0.711 s（历史表） | 1.21x（历史表） |
+| V5.3 C / K80 | **5/9** | **0.684670 s** | **1.258x** |
+| V5.3 D / K80 | **3/9** | **0.684359 s** | **1.258x** |
+
+C 成功任务为 `BananaInBowlTask`、`BananaOnPlateTask`、`RubiksCubeTask`、`RubiksCubeAndBananaTask`、`FruitsOnPlate3Task`。D 成功任务为 `BananaInBowlTask`、`BananaOnPlateTask`、`YogurtInBowlTask`。C 与 Version1 虽同为 5/9，但逐任务成功集合不同；D 的 `BananaOnPlateTask` 成功也需要 535 步，明显慢于 C 的 171 步。
+
+完整逐任务结果、原始服务端产物与计时边界见：
+
+```text
+/root/robolab/experiments/preliminary/sparsity/velocity_cache/
+acd_packed_kernel_k80_9tasks_seed579362556_v1/
+```
+
 完整数值、原始服务端 request 计时和视频位于：
 
 ```text
