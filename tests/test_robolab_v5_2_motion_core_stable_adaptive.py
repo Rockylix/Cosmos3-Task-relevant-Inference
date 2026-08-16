@@ -53,6 +53,34 @@ def test_raw_profile_retains_true_future_frame_mass() -> None:
     assert not torch.allclose(profiles.sum(-1), torch.ones(8))
 
 
+def test_raw_profile_scales_q_before_large_dot_product() -> None:
+    spatial = 1
+    num_gen = 9 * spatial + 33
+    layout = {
+        "num_gen_tokens": num_gen,
+        "action_queries": [
+            {"query_role": "predicted", "action_horizon": horizon, "gen_position": 9 * spatial + 1 + horizon}
+            for horizon in range(32)
+        ],
+        "latent_positions": {f"L{latent}": [latent] for latent in range(9)},
+    }
+    q = torch.full((num_gen, 2, 4), 1e20)
+    k_ar = torch.full((3, 1, 4), 1e20)
+    k_gen = torch.full((num_gen, 1, 4), 1e20)
+
+    profiles = action_aligned_future_raw_profiles(
+        torch=torch,
+        q_gen=q,
+        k_ar=k_ar,
+        k_gen=k_gen,
+        scaling=1e-20,
+        token_layout=layout,
+    )
+
+    assert torch.isfinite(profiles).all()
+    assert (profiles >= 0).all()
+
+
 def test_v52_plan_selects_mass_and_concentration_core_and_nests_every_arm() -> None:
     plan = build_v52_ablation_plan(
         torch=torch,

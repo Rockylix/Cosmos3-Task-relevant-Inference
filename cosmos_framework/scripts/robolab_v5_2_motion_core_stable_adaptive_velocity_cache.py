@@ -73,7 +73,12 @@ def action_aligned_future_raw_profiles(
     q = q_gen.index_select(0, action_index).detach().float().permute(1, 0, 2).contiguous()
     k = torch.cat((k_ar, k_gen), dim=0).detach().float()
     k = k.repeat_interleave(q_heads // kv_heads, dim=1).permute(1, 0, 2).contiguous()
-    probabilities = torch.softmax(torch.matmul(q, k.transpose(1, 2)) * float(scaling), dim=-1)
+    # Apply the attention scale before materializing the dense profile logits.
+    # This is mathematically equivalent to scaling the completed dot product,
+    # but avoids overflowing the unscaled FP32 accumulator for rare large Q/K
+    # states.  The production attention kernel likewise never needs to retain
+    # an unscaled full-logit matrix.
+    probabilities = torch.softmax(torch.matmul(q * float(scaling), k.transpose(1, 2)), dim=-1)
     head_mean = probabilities.mean(dim=0)
     if validate and not bool(torch.isfinite(head_mean).all()):
         raise RuntimeError("V5.2 Action attention profile contains NaN/Inf")

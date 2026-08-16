@@ -141,3 +141,21 @@ OMNI_KIT_ACCEPT_EULA=Y CUDA_VISIBLE_DEVICES=0 \
   --task BananaInBowlTask --num-envs 1 --num-runs 1 \
   --headless --video-mode viewport --output-folder-name <new-run-id>
 ```
+
+## 9. Seed 579362556 九任务闭环
+
+相同环境 seed 0、policy seed 579362556、shift 5、4 steps、无 compile/CUDA
+graphs，各 task 一个 episode：
+
+| 策略 | Success | 稳定单 chunk median | Dense speedup |
+|---|---:|---:|---:|
+| Current C / K192-160-144 | 4/9 (44.4%) | 0.575190 s | 1.486x |
+| V6-A / Core64 / K184-152-136 | 5/9 (55.6%) | 0.566990 s | 1.508x |
+
+V6-A 额外成功 `RubiksCubesInBinTask`；其余八项胜负与 Current C 相同。但
+`RubiksCubeTask` 的成功步数由 137 增至 578，因此不能从 pooled 结果推断轨迹
+等价或稳定成功率提升。
+
+完整逐任务表、闭环 warm 请求计时、token 统计与异常说明：
+
+`/root/robolab/experiments/preliminary/sparsity/velocity_cache/core64_stable_fixed_9tasks_seed579362556_v1/report_cn.md`
