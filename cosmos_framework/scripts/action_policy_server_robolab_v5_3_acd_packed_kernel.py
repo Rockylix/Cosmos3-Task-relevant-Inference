@@ -12,12 +12,15 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
 import torch
 import tyro
+from PIL import Image
 
 from cosmos_framework.scripts.action_policy_server_robolab import (
     RobolabPolicyService,
     RobolabServerArgs,
+    _extract_observation_image,
     _load_openpi_websocket_policy_server,
 )
 from cosmos_framework.scripts.action_policy_server_utils import get_local_ip
@@ -91,6 +94,8 @@ class V53ServerArgs(RobolabServerArgs):
     max_replacements: int = DEFAULT_MAX_REPLACEMENTS
     validate_intermediates: bool = False
     enable_nvtx: bool = False
+    capture_first_mask_overlay_per_prompt: bool = False
+    """Decode and save L1-L8 frames for the first request of each distinct prompt."""
     intervention_output_dir: Path = Path(
         "/root/robolab/experiments/preliminary/sparsity/velocity_cache/"
         "acd_packed_kernel_k80_1task_seed579362556_v1/server"
@@ -135,6 +140,10 @@ class V53PolicyService(RobolabPolicyService):
         self._output_dir = args.intervention_output_dir.expanduser().absolute()
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._summaries: list[dict[str, Any]] = []
+        self._capture_first_mask_overlay_per_prompt = bool(args.capture_first_mask_overlay_per_prompt)
+        self._captured_overlay_prompts: set[str] = set()
+        self._active_prompt: str | None = None
+        self._active_conditioning_image: np.ndarray | None = None
         original_generate = self.model.generate_samples_from_batch
 
         def experimental_generate(*generate_args: Any, **generate_kwargs: Any) -> Any:
@@ -181,6 +190,52 @@ class V53PolicyService(RobolabPolicyService):
             torch.cuda.synchronize()
             wall_s = time.perf_counter() - start
             token_summary = controller.finish() if controller is not None else None
+            prompt = self._active_prompt
+            if (
+                controller is not None
+                and self._capture_first_mask_overlay_per_prompt
+                and prompt is not None
+                and prompt not in self._captured_overlay_prompts
+            ):
+                decoded = self.model.decode(samples["vision"][0]).detach().cpu().float()
+                if decoded.ndim == 5 and int(decoded.shape[0]) == 1:
+                    decoded = decoded[0]
+                if decoded.ndim != 4 or int(decoded.shape[0]) != 3:
+                    raise RuntimeError(f"Expected decoded [C,T,H,W], got {tuple(decoded.shape)}")
+                if float(decoded.min()) < 0.0:
+                    decoded = (decoded + 1.0) / 2.0
+                frames = (
+                    (decoded.clamp(0, 1) * 255)
+                    .round()
+                    .to(torch.uint8)
+                    .permute(1, 2, 3, 0)
+                    .numpy()
+                )
+                frames_dir = request_dir / "predicted_future_frames"
+                frames_dir.mkdir(parents=True, exist_ok=True)
+                for latent in range(1, 9):
+                    decoded_index = latent * 4
+                    Image.fromarray(np.ascontiguousarray(frames[decoded_index])).save(
+                        frames_dir / f"frame_{decoded_index:03d}.png"
+                    )
+                if self._active_conditioning_image is not None:
+                    Image.fromarray(np.ascontiguousarray(self._active_conditioning_image)).save(
+                        request_dir / "conditioning_image.png"
+                    )
+                (request_dir / "mask_overlay_capture.json").write_text(
+                    json.dumps(
+                        {
+                            "prompt": prompt,
+                            "request_index": request_index,
+                            "decoded_indices": [latent * 4 for latent in range(1, 9)],
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                self._captured_overlay_prompts.add(prompt)
             self._summaries.append(
                 {
                     "request_index": request_index,
@@ -217,6 +272,17 @@ class V53PolicyService(RobolabPolicyService):
             return samples
 
         self.model.generate_samples_from_batch = experimental_generate
+
+    def infer(self, obs: dict[str, Any]) -> dict[str, Any]:
+        if not self._capture_first_mask_overlay_per_prompt:
+            return super().infer(obs)
+        self._active_prompt = str(obs["prompt"])
+        self._active_conditioning_image = _extract_observation_image(obs).copy()
+        try:
+            return super().infer(obs)
+        finally:
+            self._active_prompt = None
+            self._active_conditioning_image = None
 
 
 def serve(args: V53ServerArgs) -> None:

@@ -57,6 +57,7 @@ def main() -> None:
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--frames-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--title-prefix", default="V5.2")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     artifact = torch.load(args.artifact, map_location="cpu", weights_only=True)
@@ -69,7 +70,7 @@ def main() -> None:
             labels[group],
             masks[group],
             args.frames_dir,
-            f"V5.2 arm {mode.upper()} execution categories | G{group + 1}",
+            f"{args.title_prefix} execution categories | G{group + 1}",
             args.output_dir / f"category_overlay_g{group + 1}.png",
         )
         for frame in range(8):
