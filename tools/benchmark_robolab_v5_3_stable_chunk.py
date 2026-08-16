@@ -29,6 +29,9 @@ from cosmos_framework.scripts.robolab_v5_3_acd_packed_kernel_velocity_cache impo
     V53OptimizedACDController,
     V53VelocityCacheSampler,
 )
+from cosmos_framework.scripts.robolab_v5_3_c_cond_dense_step0 import (
+    V53CConditionalDenseStep0Controller,
+)
 from tools.run_robolab_step0_fixed_roi_velocity_cache import (
     CHECKPOINT,
     CONDITIONING_IMAGE,
@@ -47,7 +50,7 @@ DEFAULT_OUTPUT = Path(
     "/root/robolab/experiments/preliminary/sparsity/velocity_cache/"
     "ac_budget_packed_kernel_shift5_BananaInBowlTask_c3_k80_v1"
 )
-MODES = ("dense", "a_ref", "a_opt", "c_ref", "c_opt", "d_ref", "d_opt")
+MODES = ("dense", "a_ref", "a_opt", "c_ref", "c_opt", "c_cond_opt", "d_ref", "d_opt")
 
 
 def _percentile(values: list[float], q: float) -> float:
@@ -84,20 +87,29 @@ def _run_once(args: argparse.Namespace, data_batch: dict[str, Any], label: str) 
     controller = None
     sampler = args.service.model.sampler
     if label != "dense":
-        mode, runtime = label.split("_", maxsplit=1)
-        kwargs = _controller_kwargs(args, mode)
-        if runtime == "ref":
-            controller = V52MotionCoreStableAdaptiveController(**kwargs)
-            sampler = V52VelocityCacheSampler(args.service.model.sampler, controller)
-        elif runtime == "opt":
-            controller = V53OptimizedACDController(
+        if label == "c_cond_opt":
+            kwargs = _controller_kwargs(args, "c")
+            controller = V53CConditionalDenseStep0Controller(
                 **kwargs,
                 validate_intermediates=False,
                 enable_nvtx=args.enable_nvtx,
             )
             sampler = V53VelocityCacheSampler(args.service.model.sampler, controller)
         else:
-            raise ValueError(f"Unknown runtime {runtime}")
+            mode, runtime = label.split("_", maxsplit=1)
+            kwargs = _controller_kwargs(args, mode)
+            if runtime == "ref":
+                controller = V52MotionCoreStableAdaptiveController(**kwargs)
+                sampler = V52VelocityCacheSampler(args.service.model.sampler, controller)
+            elif runtime == "opt":
+                controller = V53OptimizedACDController(
+                    **kwargs,
+                    validate_intermediates=False,
+                    enable_nvtx=args.enable_nvtx,
+                )
+                sampler = V53VelocityCacheSampler(args.service.model.sampler, controller)
+            else:
+                raise ValueError(f"Unknown runtime {runtime}")
 
     _reset_rng(args.seed)
     kwargs = {
@@ -121,8 +133,16 @@ def _run_once(args: argparse.Namespace, data_batch: dict[str, Any], label: str) 
 
 
 def _output_metrics(reference: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    reference_action = _tensor(reference["action"])
+    candidate_action = _tensor(candidate["action"])
+    reference_delta = reference_action[1:, :7] - reference_action[:-1, :7]
+    candidate_delta = candidate_action[1:, :7] - candidate_action[:-1, :7]
+    reference_jerk = reference_action[2:, :7] - 2 * reference_action[1:-1, :7] + reference_action[:-2, :7]
+    candidate_jerk = candidate_action[2:, :7] - 2 * candidate_action[1:-1, :7] + candidate_action[:-2, :7]
     return {
-        "action": _metrics(_tensor(reference["action"]), _tensor(candidate["action"])),
+        "action": _metrics(reference_action, candidate_action),
+        "action_delta": _metrics(reference_delta, candidate_delta),
+        "action_jerk": _metrics(reference_jerk, candidate_jerk),
         "vision": _metrics(_tensor(reference["vision"]), _tensor(candidate["vision"])),
     }
 
