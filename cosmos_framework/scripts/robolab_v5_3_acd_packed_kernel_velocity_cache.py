@@ -104,6 +104,7 @@ class V53OptimizedACDController(V52MotionCoreStableAdaptiveController):
             k_gen=kwargs["k_gen"],
             scaling=float(kwargs["scaling"]),
             token_layout=self._layout,
+            action_horizon_weights=self.action_horizon_weights,
             validate=self.validate_intermediates,
         ).detach()
         self._profile_tensors.append(raw)
@@ -195,7 +196,7 @@ class V53OptimizedACDController(V52MotionCoreStableAdaptiveController):
         assert self._current is not None and self._position_embeddings is not None
         step = int(self._current["step"])
         attention = decoder_layer.self_attn
-        capture = step == 0 and block >= self.first_sparse_block
+        capture = step == 0 and self._should_capture_step0_profile(block)
         if capture:
             if attention._attention_stats_capture_callback is not None:
                 raise RuntimeError(f"B{block} attention callback is occupied")

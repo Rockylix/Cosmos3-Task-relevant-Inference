@@ -55,6 +55,24 @@ from cosmos_framework.scripts.robolab_v6_core64_stable_fixed import (
 from cosmos_framework.scripts.robolab_v6_core64_stable_fixed import (
     V6Core64StableFixedController,
 )
+from cosmos_framework.scripts.robolab_v7_direct_core96_weighted_g1_b0 import (
+    STABLE_BUDGETS as V7_STABLE_BUDGETS,
+)
+from cosmos_framework.scripts.robolab_v7_direct_core96_weighted_g1_b0 import (
+    STRATEGY_VERSION as V7_DIRECT_CORE96_WEIGHTED_STRATEGY_VERSION,
+)
+from cosmos_framework.scripts.robolab_v7_direct_core96_weighted_g1_b0 import (
+    TOKEN_BUDGETS as V7_TOKEN_BUDGETS,
+)
+from cosmos_framework.scripts.robolab_v7_direct_core96_weighted_g1_b0 import (
+    V7DirectCore96WeightedG1B0Controller,
+)
+from cosmos_framework.scripts.robolab_v8_core_stable_coverage_fill import (
+    STRATEGY_VERSION as V8_CORE_STABLE_COVERAGE_FILL_STRATEGY_VERSION,
+)
+from cosmos_framework.scripts.robolab_v8_core_stable_coverage_fill import (
+    V8CoreStableCoverageFillController,
+)
 from cosmos_framework.utils import log
 
 
@@ -77,6 +95,8 @@ class V53ServerArgs(RobolabServerArgs):
         "c_cond_step0",
         "c_cond_step0_b0_sparse",
         "c_core64_stable_fixed_b0_sparse",
+        "c_direct_core96_weighted_g1_b0",
+        "c_core96_coverage_stable_fill",
         "d",
     ] = "c"
     """Closed-loop arm: Dense reference or one optimized V5.3 sparse arm."""
@@ -126,6 +146,12 @@ class V53PolicyService(RobolabPolicyService):
         if str(args.ablation_mode) == "c_core64_stable_fixed_b0_sparse":
             token_budgets = V6_TOKEN_BUDGETS
             stable_budgets = V6_STABLE_BUDGETS
+        elif str(args.ablation_mode) in {
+            "c_direct_core96_weighted_g1_b0",
+            "c_core96_coverage_stable_fill",
+        }:
+            token_budgets = V7_TOKEN_BUDGETS
+            stable_budgets = V7_STABLE_BUDGETS
         if any(not 0 < value <= 340 for value in token_budgets) or not (
             token_budgets[0] >= token_budgets[1] >= token_budgets[2]
         ):
@@ -158,11 +184,20 @@ class V53PolicyService(RobolabPolicyService):
                     "c_cond_step0": V53CConditionalDenseStep0Controller,
                     "c_cond_step0_b0_sparse": V53CConditionalDenseStep0AllSparseLaterController,
                     "c_core64_stable_fixed_b0_sparse": V6Core64StableFixedController,
+                    "c_direct_core96_weighted_g1_b0": V7DirectCore96WeightedG1B0Controller,
+                    "c_core96_coverage_stable_fill": V8CoreStableCoverageFillController,
                 }.get(self._mode, V53OptimizedACDController)
                 controller = controller_cls(
                     ablation_mode=(
                         "c"
-                        if self._mode in {"c_cond_step0", "c_cond_step0_b0_sparse", "c_core64_stable_fixed_b0_sparse"}
+                        if self._mode
+                        in {
+                            "c_cond_step0",
+                            "c_cond_step0_b0_sparse",
+                            "c_core64_stable_fixed_b0_sparse",
+                            "c_direct_core96_weighted_g1_b0",
+                            "c_core96_coverage_stable_fill",
+                        }
                         else self._mode
                     ),
                     torch=torch,
@@ -255,6 +290,8 @@ class V53PolicyService(RobolabPolicyService):
                     "c_cond_step0": STRATEGY_VERSION,
                     "c_cond_step0_b0_sparse": ALL_SPARSE_LATER_STRATEGY_VERSION,
                     "c_core64_stable_fixed_b0_sparse": V6_CORE64_STABLE_FIXED_STRATEGY_VERSION,
+                    "c_direct_core96_weighted_g1_b0": V7_DIRECT_CORE96_WEIGHTED_STRATEGY_VERSION,
+                    "c_core96_coverage_stable_fill": V8_CORE_STABLE_COVERAGE_FILL_STRATEGY_VERSION,
                 }.get(self._mode, "v5.3"),
                 "ablation_mode": self._mode,
                 "format_prompt_as_json": args.format_prompt_as_json,
@@ -289,10 +326,13 @@ class V53PolicyService(RobolabPolicyService):
 
 
 def serve(args: V53ServerArgs) -> None:
-    displayed_budgets = (
-        V6_TOKEN_BUDGETS
-        if str(args.ablation_mode) == "c_core64_stable_fixed_b0_sparse"
-        else (args.roi_tokens_g1, args.roi_tokens_g2, args.roi_tokens_g3)
+    displayed_budgets = {
+        "c_core64_stable_fixed_b0_sparse": V6_TOKEN_BUDGETS,
+        "c_direct_core96_weighted_g1_b0": V7_TOKEN_BUDGETS,
+        "c_core96_coverage_stable_fill": V7_TOKEN_BUDGETS,
+    }.get(
+        str(args.ablation_mode),
+        (args.roi_tokens_g1, args.roi_tokens_g2, args.roi_tokens_g3),
     )
     log.info(
         f"[v5.3-closed-loop-server] host={socket.gethostname()} bind={args.host}:{int(args.port)} "

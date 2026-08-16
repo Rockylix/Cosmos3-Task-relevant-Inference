@@ -46,6 +46,7 @@ def action_aligned_future_raw_profiles(
     k_gen: Any,
     scaling: float,
     token_layout: Mapping[str, Any],
+    action_horizon_weights: Sequence[float] = (0.25, 0.25, 0.25, 0.25),
     validate: bool = True,
 ) -> Any:
     """Return raw Action-aligned future attention, shape ``[8, spatial]``.
@@ -84,11 +85,18 @@ def action_aligned_future_raw_profiles(
         raise RuntimeError("V5.2 Action attention profile contains NaN/Inf")
 
     num_ar = int(k_ar.shape[0])
+    horizon_weights = torch.tensor(action_horizon_weights, dtype=head_mean.dtype, device=head_mean.device)
+    if tuple(horizon_weights.shape) != (4,) or not bool(torch.isfinite(horizon_weights).all()):
+        raise ValueError("Action horizon weights must contain four finite values")
+    if bool((horizon_weights < 0).any()) or float(horizon_weights.sum()) <= 0:
+        raise ValueError("Action horizon weights must be non-negative with a positive sum")
+    horizon_weights = horizon_weights / horizon_weights.sum()
     profiles = []
     for latent in range(1, 9):
         horizons = list(range(4 * (latent - 1), 4 * latent))
         positions = torch.tensor(token_layout["latent_positions"][f"L{latent}"], dtype=torch.long, device=q_gen.device)
-        profiles.append(head_mean[horizons].index_select(-1, positions + num_ar).mean(dim=0))
+        aligned = head_mean[horizons].index_select(-1, positions + num_ar)
+        profiles.append((aligned * horizon_weights[:, None]).sum(dim=0))
     result = torch.stack(profiles)
     if validate and (not bool(torch.isfinite(result).all()) or bool((result < 0).any())):
         raise RuntimeError("V5.2 raw attention profile is invalid")
@@ -530,6 +538,8 @@ class V52MotionCoreStableAdaptiveController(GroupedTemporalClosedROISparseContro
         core_block_count: int = DEFAULT_CORE_BLOCK_COUNT,
         core_token_budget: int = DEFAULT_CORE_TOKEN_BUDGET,
         stable_reference_core_token_budget: int | None = None,
+        profile_block_groups: Sequence[tuple[int, int]] | None = None,
+        action_horizon_weights: Sequence[float] = (0.25, 0.25, 0.25, 0.25),
         stable_cv_penalty: float = DEFAULT_STABLE_CV_PENALTY,
         replacement_relative_threshold: float = DEFAULT_REPLACEMENT_RELATIVE_THRESHOLD,
         max_replacements: int = DEFAULT_MAX_REPLACEMENTS,
@@ -540,6 +550,29 @@ class V52MotionCoreStableAdaptiveController(GroupedTemporalClosedROISparseContro
             raise ValueError(f"Unknown V5.2 ablation mode {ablation_mode!r}")
         super().__init__(**kwargs)
         self.ablation_mode = mode
+        self.profile_block_groups = tuple(
+            (int(start), int(end))
+            for start, end in (self.block_groups if profile_block_groups is None else profile_block_groups)
+        )
+        if len(self.profile_block_groups) != len(self.block_groups):
+            raise ValueError("Profile and execution block groups must have the same count")
+        if self.profile_block_groups[0][0] < 0 or self.profile_block_groups[-1][1] >= len(self.layers):
+            raise ValueError("Profile block groups must fit the decoder")
+        if any(
+            self.profile_block_groups[index][1] + 1 != self.profile_block_groups[index + 1][0]
+            for index in range(len(self.profile_block_groups) - 1)
+        ):
+            raise ValueError("Profile block groups must be contiguous")
+        if any(
+            profile[1] != execution[1]
+            for profile, execution in zip(self.profile_block_groups, self.block_groups, strict=True)
+        ):
+            raise ValueError("Profile and execution groups must share end blocks")
+        weights = tuple(float(value) for value in action_horizon_weights)
+        if len(weights) != 4 or any(not math.isfinite(value) or value < 0 for value in weights) or sum(weights) <= 0:
+            raise ValueError("Action horizon weights must contain four non-negative finite values")
+        total_weight = sum(weights)
+        self.action_horizon_weights = tuple(value / total_weight for value in weights)
         self.stable_budgets = tuple(int(value) for value in stable_budgets)
         self.core_block_range = tuple(int(value) for value in core_block_range)
         self.core_block_count = int(core_block_count)
@@ -551,6 +584,9 @@ class V52MotionCoreStableAdaptiveController(GroupedTemporalClosedROISparseContro
         self.replacement_relative_threshold = float(replacement_relative_threshold)
         self.max_replacements = int(max_replacements)
         self.v52_plan: dict[str, Any] | None = None
+
+    def _should_capture_step0_profile(self, block: int) -> bool:
+        return any(start <= int(block) <= end for start, end in self.profile_block_groups)
 
     def _capture_step0_profile(self, **kwargs: Any) -> None:
         layer_index = int(kwargs["layer_index"])
@@ -566,6 +602,7 @@ class V52MotionCoreStableAdaptiveController(GroupedTemporalClosedROISparseContro
                 k_gen=kwargs["k_gen"],
                 scaling=float(kwargs["scaling"]),
                 token_layout=self._layout,
+                action_horizon_weights=self.action_horizon_weights,
             )
             .detach()
             .cpu()
@@ -593,13 +630,15 @@ class V52MotionCoreStableAdaptiveController(GroupedTemporalClosedROISparseContro
         last_branch = "conditional" if self.guidance == 1.0 else "unconditional"
         if int(self._current["step"]) != 0 or str(self._current["branch"]) != last_branch:
             return
-        expected = (1 if self.guidance == 1.0 else 2) * sum(end - start + 1 for start, end in self.block_groups)
+        expected = (1 if self.guidance == 1.0 else 2) * sum(
+            end - start + 1 for start, end in self.profile_block_groups
+        )
         if len(self.profile_records) != expected:
             raise RuntimeError(f"Expected {expected} V5.2 profiles, got {len(self.profile_records)}")
         self.v52_plan = build_v52_ablation_plan(
             torch=self.torch,
             profile_records=self.profile_records,
-            block_groups=self.block_groups,
+            block_groups=self.profile_block_groups,
             token_budgets=self.token_budgets,
             stable_budgets=self.stable_budgets,
             core_block_range=self.core_block_range,
@@ -668,6 +707,8 @@ class V52MotionCoreStableAdaptiveController(GroupedTemporalClosedROISparseContro
                 "core_blocks": self.v52_plan["core_blocks"],
                 "core_token_budget": self.core_token_budget,
                 "stable_reference_core_token_budget": self.v52_plan["stable_reference_core_token_budget"],
+                "profile_block_groups": [list(group) for group in self.profile_block_groups],
+                "action_horizon_weights": list(self.action_horizon_weights),
                 "stable_cv_penalty": self.stable_cv_penalty,
                 "replacement_relative_threshold": self.replacement_relative_threshold,
                 "max_replacements": self.max_replacements,

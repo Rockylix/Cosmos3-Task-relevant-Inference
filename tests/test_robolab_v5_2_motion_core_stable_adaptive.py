@@ -81,6 +81,80 @@ def test_raw_profile_scales_q_before_large_dot_product() -> None:
     assert (profiles >= 0).all()
 
 
+def test_raw_profile_applies_symmetric_center_action_weights() -> None:
+    spatial = 2
+    num_gen = 9 * spatial + 33
+    layout = {
+        "num_gen_tokens": num_gen,
+        "action_queries": [
+            {"query_role": "predicted", "action_horizon": horizon, "gen_position": 9 * spatial + 1 + horizon}
+            for horizon in range(32)
+        ],
+        "latent_positions": {
+            f"L{latent}": list(range(latent * spatial, (latent + 1) * spatial)) for latent in range(9)
+        },
+    }
+    q = torch.zeros(num_gen, 2, 1)
+    for horizon, value in enumerate((0.0, 1.0, 4.0, 10.0)):
+        q[layout["action_queries"][horizon]["gen_position"], :, 0] = value
+    k_ar = torch.zeros(3, 1, 1)
+    k_gen = torch.zeros(num_gen, 1, 1)
+    k_gen[layout["latent_positions"]["L1"][0], :, 0] = 1.0
+    k_gen[layout["latent_positions"]["L1"][1], :, 0] = -1.0
+
+    weighted = action_aligned_future_raw_profiles(
+        torch=torch,
+        q_gen=q,
+        k_ar=k_ar,
+        k_gen=k_gen,
+        scaling=1.0,
+        token_layout=layout,
+        action_horizon_weights=(1 / 6, 1 / 3, 1 / 3, 1 / 6),
+    )
+    middle = action_aligned_future_raw_profiles(
+        torch=torch,
+        q_gen=q,
+        k_ar=k_ar,
+        k_gen=k_gen,
+        scaling=1.0,
+        token_layout=layout,
+        action_horizon_weights=(0, 0.5, 0.5, 0),
+    )
+    edges = action_aligned_future_raw_profiles(
+        torch=torch,
+        q_gen=q,
+        k_ar=k_ar,
+        k_gen=k_gen,
+        scaling=1.0,
+        token_layout=layout,
+        action_horizon_weights=(0.5, 0, 0, 0.5),
+    )
+    assert torch.allclose(weighted[0], (2.0 / 3.0) * middle[0] + (1.0 / 3.0) * edges[0])
+
+
+def test_v52_plan_supports_b0_profile_and_direct_core_selection() -> None:
+    records = []
+    for block in range(6):
+        profiles = torch.full((8, 24), 0.01)
+        for frame in range(8):
+            profiles[frame, (frame + block) % 24] += 0.2 + 0.01 * block
+        records.append({"branch": "conditional", "block": block, "profiles": profiles})
+    plan = build_v52_ablation_plan(
+        torch=torch,
+        profile_records=records,
+        block_groups=((0, 1), (2, 3), (4, 5)),
+        token_budgets=(14, 12, 10),
+        stable_budgets=(5, 4, 3),
+        core_block_range=(1, 4),
+        core_block_count=2,
+        core_token_budget=4,
+        stable_reference_core_token_budget=4,
+    )
+    assert torch.equal(plan["stable_reference_core_masks"], plan["core_masks"])
+    assert plan["core_masks"].sum(-1).tolist() == [4] * 8
+    assert plan["execution_masks"]["c"].sum(-1).tolist() == [[14] * 8, [12] * 8, [10] * 8]
+
+
 def test_v52_plan_selects_mass_and_concentration_core_and_nests_every_arm() -> None:
     plan = build_v52_ablation_plan(
         torch=torch,

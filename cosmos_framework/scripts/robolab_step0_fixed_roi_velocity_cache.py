@@ -166,6 +166,11 @@ class Step0FixedROISparseController(ActionAttentionMass90Controller):
         self._profile_rows: list[dict[str, Any]] = []
         self._profile_callback_block: int | None = None
 
+    def _should_capture_step0_profile(self, block: int) -> bool:
+        """Return whether a dense step-0 block contributes to ROI profiling."""
+
+        return int(block) >= self.first_sparse_block
+
     def _network_post_hook(self, module: Any, args: tuple[Any, ...], kwargs: Mapping[str, Any], output: Any) -> None:
         if isinstance(output, dict) and output.get("preds_vision"):
             shape = tuple(int(value) for value in output["preds_vision"][0].shape)
@@ -243,7 +248,7 @@ class Step0FixedROISparseController(ActionAttentionMass90Controller):
         # Step 0 and B0..B3 of later steps remain exactly dense.
         if step == 0 or block < self.first_sparse_block:
             attention = decoder_layer.self_attn
-            capture = step == 0 and block >= self.first_sparse_block
+            capture = step == 0 and self._should_capture_step0_profile(block)
             if capture:
                 if attention._attention_stats_capture_callback is not None:
                     raise RuntimeError(f"B{block} attention callback is occupied")
