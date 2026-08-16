@@ -92,6 +92,33 @@ OMNI_KIT_ACCEPT_EULA=Y CUDA_VISIBLE_DEVICES=0 \
 /root/robolab/RoboLab/output/c_cond_dense_step0_k80_BananaInBowlTask_seed579362556_v1/BananaInBowlTask/Pick_up_the_banana_and_place_it_in_the_bowl_0_viewport.mp4
 ```
 
+## 九任务闭环
+
+沿用环境 seed `0`、policy seed `579362556`、shift `5`、4-step UniPC、K80 和相同任务顺序，完成 9 个不同任务、每任务 1 个 episode：
+
+| 难度 | Task | Success | Steps |
+|---|---|---:|---:|
+| 简单 | BananaInBowlTask | 1 | 556 |
+| 简单 | BananaOnPlateTask | 1 | 138 |
+| 简单 | RubiksCubeTask | 0 | 600 |
+| 简单 | RubiksCubeAndBananaTask | 1 | 557 |
+| 简单 | YogurtInBowlTask | 1 | 353 |
+| 普通 | RubiksCubeLeftOfBowlTask | 0 | 450 |
+| 普通 | RubiksCubeRightOfBowlTask | 1 | 186 |
+| 困难 | RubiksCubesInBinTask | 1 | 1584 |
+| 困难 | FruitsOnPlate3Task | 0 | 3000 |
+| **总计** |  | **6/9（66.7%）** |  |
+
+同协议历史原 C/K80 为 `5/9`。新策略丢失 `RubiksCubeTask`、`FruitsOnPlate3Task`，新增 `YogurtInBowlTask`、`RubiksCubeRightOfBowlTask`、`RubiksCubesInBinTask`，因此不能把净增 1 项解释为逐任务一致改善。
+
+服务共完成 237 个请求；236 个 warm 请求 median `0.618536 s`、P90 `0.635924 s`。主性能结论仍采用上面的冻结单 chunk 20 轮数据：median `0.613644 s`、相对同轮 Dense `1.396x`。
+
+完整报告：
+
+```text
+/root/robolab/experiments/preliminary/sparsity/velocity_cache/c_cond_dense_step0_k80_9tasks_seed579362556_v1/report_cn.md
+```
+
 ## 结论边界
 
-该消融证明 Step-0 unconditional 全量计算不是 BananaInBowl 固定 seed 下的必要条件，并将稳定单 chunk 加速从原 C 的 `1.255x` 提高到 `1.396x`。但当前只有一个任务、一个环境 seed、一个 episode；且 delta/jerk 与 Dense 差异仍大，不能据此宣称多任务成功率不变。
+该消融证明 Step-0 unconditional 全量计算不是该固定 seed 下 6 个已成功任务的必要条件，并将稳定单 chunk 加速从原 C 的 `1.255x` 提高到 `1.396x`。但当前仍只有一个经过历史筛选的 policy seed、每任务一个 episode；且 delta/jerk 与 Dense 差异仍大，不能据此宣称总体成功率提升或多任务性能不变。
