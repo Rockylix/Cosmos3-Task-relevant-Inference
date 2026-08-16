@@ -120,3 +120,35 @@ def test_d_reports_forced_and_thresholded_replacements_separately() -> None:
     assert all(row["forced_replacements"] >= 0 for row in rows)
     assert all(0 <= row["threshold_accepted"] <= 1 for row in rows)
     assert all(row["threshold_rejected"] >= 0 for row in rows)
+
+
+def test_expanded_core_preserves_reference_stable_mask_and_exact_budgets() -> None:
+    common = {
+        "torch": torch,
+        "profile_records": _records(spatial=24),
+        "block_groups": ((4, 5), (6, 7), (8, 9)),
+        "stable_budgets": (5, 4, 3),
+        "core_block_range": (4, 7),
+        "core_block_count": 1,
+        "max_replacements": 1,
+    }
+    reference = build_v52_ablation_plan(
+        **common,
+        token_budgets=(12, 10, 8),
+        core_token_budget=2,
+    )
+    expanded = build_v52_ablation_plan(
+        **common,
+        token_budgets=(14, 12, 10),
+        core_token_budget=4,
+        stable_reference_core_token_budget=2,
+    )
+    assert torch.equal(expanded["stable_masks"], reference["stable_masks"])
+    assert torch.equal(expanded["stable_reference_core_masks"], reference["core_masks"])
+    assert expanded["core_masks"].sum(-1).tolist() == [4] * 8
+    assert torch.all(expanded["core_masks"] | ~expanded["stable_reference_core_masks"])
+    assert not bool((expanded["stable_masks"] & expanded["core_masks"].any(0)).any())
+    masks = expanded["execution_masks"]["c"]
+    assert masks.sum(-1).tolist() == [[14] * 8, [12] * 8, [10] * 8]
+    assert not bool((masks[2] & ~masks[1]).any())
+    assert not bool((masks[1] & ~masks[0]).any())

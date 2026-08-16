@@ -320,6 +320,7 @@ def build_v52_ablation_plan(
     core_block_range: tuple[int, int] = DEFAULT_CORE_BLOCK_RANGE,
     core_block_count: int = DEFAULT_CORE_BLOCK_COUNT,
     core_token_budget: int = DEFAULT_CORE_TOKEN_BUDGET,
+    stable_reference_core_token_budget: int | None = None,
     stable_cv_penalty: float = DEFAULT_STABLE_CV_PENALTY,
     replacement_relative_threshold: float = DEFAULT_REPLACEMENT_RELATIVE_THRESHOLD,
     max_replacements: int = DEFAULT_MAX_REPLACEMENTS,
@@ -338,6 +339,13 @@ def build_v52_ablation_plan(
         raise ValueError("V5.2 stable budgets must be non-increasing")
     if not 0 < core_token_budget <= budgets[-1]:
         raise ValueError("Core budget must fit the smallest group")
+    reference_core_budget = (
+        int(core_token_budget)
+        if stable_reference_core_token_budget is None
+        else int(stable_reference_core_token_budget)
+    )
+    if not 0 < reference_core_budget <= core_token_budget:
+        raise ValueError("Stable-reference Core budget must be in (0, final Core budget]")
     if core_block_count <= 0 or max_replacements < 0 or replacement_relative_threshold < 0:
         raise ValueError("Invalid V5.2 core/replacement parameters")
 
@@ -360,7 +368,9 @@ def build_v52_ablation_plan(
     core_weights = core_quality / core_quality.sum().clamp_min(eps)
     branch_max = raw.amax(dim=0)
     core_scores = (branch_max.index_select(0, core_block_indices) * core_weights[:, None, None]).sum(dim=0)
-    core_masks = torch.stack([_select_mask(torch, core_scores[frame], core_token_budget) for frame in range(frames)])
+    stable_reference_core_masks = torch.stack(
+        [_select_mask(torch, core_scores[frame], reference_core_budget) for frame in range(frames)]
+    )
 
     group_raw_scores = torch.empty((groups, frames, spatial), dtype=raw.dtype, device=raw.device)
     v51_group_scores = torch.empty_like(group_raw_scores)
@@ -385,17 +395,37 @@ def build_v52_ablation_plan(
         depth_lookahead_decay=depth_lookahead_decay,
     )
     a_masks, a_labels = _outward_ranked_masks(torch=torch, scores=v51_depth_scores, budgets=budgets)
-    b_masks, b_labels = _outward_ranked_masks(
-        torch=torch, scores=v51_depth_scores, budgets=budgets, core_masks=core_masks
-    )
 
     mean = group_raw_scores.mean(dim=1)
     std = group_raw_scores.std(dim=1, unbiased=False)
     cv = std / mean.clamp_min(eps)
     stable_scores = mean / (1.0 + float(stable_cv_penalty) * cv)
-    core_union = core_masks.any(dim=0)
+    reference_core_union = stable_reference_core_masks.any(dim=0)
     stable_masks = _stable_masks(
-        torch=torch, stable_scores=stable_scores, stable_budgets=stable_counts, forbidden=core_union
+        torch=torch,
+        stable_scores=stable_scores,
+        stable_budgets=stable_counts,
+        forbidden=reference_core_union,
+    )
+    if reference_core_budget == core_token_budget:
+        core_masks = stable_reference_core_masks
+    else:
+        stable_union = stable_masks.any(dim=0)
+        expanded = []
+        for frame in range(frames):
+            base = stable_reference_core_masks[frame]
+            additions = _select_mask(
+                torch,
+                core_scores[frame],
+                core_token_budget - reference_core_budget,
+                ~(base | stable_union),
+            )
+            expanded.append(base | additions)
+        core_masks = torch.stack(expanded)
+    if bool((stable_masks & core_masks.any(dim=0)).any()):
+        raise RuntimeError("Expanded Core overlaps the frozen Stable mask")
+    b_masks, b_labels = _outward_ranked_masks(
+        torch=torch, scores=v51_depth_scores, budgets=budgets, core_masks=core_masks
     )
     adaptive_scores = (group_raw_scores - mean[:, None, :]).clamp_min(0)
     c_masks, c_labels = _outward_component_masks(
@@ -463,6 +493,8 @@ def build_v52_ablation_plan(
         "core_blocks": [blocks[int(index)] for index in core_block_indices],
         "core_weights": core_weights,
         "core_scores": core_scores,
+        "stable_reference_core_token_budget": reference_core_budget,
+        "stable_reference_core_masks": stable_reference_core_masks,
         "core_masks": core_masks,
         "group_raw_scores": group_raw_scores,
         "v51_normalized": v51_normalized,
@@ -492,6 +524,7 @@ class V52MotionCoreStableAdaptiveController(GroupedTemporalClosedROISparseContro
         core_block_range: tuple[int, int] = DEFAULT_CORE_BLOCK_RANGE,
         core_block_count: int = DEFAULT_CORE_BLOCK_COUNT,
         core_token_budget: int = DEFAULT_CORE_TOKEN_BUDGET,
+        stable_reference_core_token_budget: int | None = None,
         stable_cv_penalty: float = DEFAULT_STABLE_CV_PENALTY,
         replacement_relative_threshold: float = DEFAULT_REPLACEMENT_RELATIVE_THRESHOLD,
         max_replacements: int = DEFAULT_MAX_REPLACEMENTS,
@@ -506,6 +539,9 @@ class V52MotionCoreStableAdaptiveController(GroupedTemporalClosedROISparseContro
         self.core_block_range = tuple(int(value) for value in core_block_range)
         self.core_block_count = int(core_block_count)
         self.core_token_budget = int(core_token_budget)
+        self.stable_reference_core_token_budget = (
+            None if stable_reference_core_token_budget is None else int(stable_reference_core_token_budget)
+        )
         self.stable_cv_penalty = float(stable_cv_penalty)
         self.replacement_relative_threshold = float(replacement_relative_threshold)
         self.max_replacements = int(max_replacements)
@@ -564,6 +600,7 @@ class V52MotionCoreStableAdaptiveController(GroupedTemporalClosedROISparseContro
             core_block_range=self.core_block_range,
             core_block_count=self.core_block_count,
             core_token_budget=self.core_token_budget,
+            stable_reference_core_token_budget=self.stable_reference_core_token_budget,
             stable_cv_penalty=self.stable_cv_penalty,
             replacement_relative_threshold=self.replacement_relative_threshold,
             max_replacements=self.max_replacements,
@@ -625,6 +662,7 @@ class V52MotionCoreStableAdaptiveController(GroupedTemporalClosedROISparseContro
                 "stable_budgets": list(self.stable_budgets),
                 "core_blocks": self.v52_plan["core_blocks"],
                 "core_token_budget": self.core_token_budget,
+                "stable_reference_core_token_budget": self.v52_plan["stable_reference_core_token_budget"],
                 "stable_cv_penalty": self.stable_cv_penalty,
                 "replacement_relative_threshold": self.replacement_relative_threshold,
                 "max_replacements": self.max_replacements,

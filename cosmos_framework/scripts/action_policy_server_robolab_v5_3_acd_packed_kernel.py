@@ -40,6 +40,18 @@ from cosmos_framework.scripts.robolab_v5_3_c_cond_dense_step0 import (
     V53CConditionalDenseStep0AllSparseLaterController,
     V53CConditionalDenseStep0Controller,
 )
+from cosmos_framework.scripts.robolab_v6_core64_stable_fixed import (
+    STABLE_BUDGETS as V6_STABLE_BUDGETS,
+)
+from cosmos_framework.scripts.robolab_v6_core64_stable_fixed import (
+    STRATEGY_VERSION as V6_CORE64_STABLE_FIXED_STRATEGY_VERSION,
+)
+from cosmos_framework.scripts.robolab_v6_core64_stable_fixed import (
+    TOKEN_BUDGETS as V6_TOKEN_BUDGETS,
+)
+from cosmos_framework.scripts.robolab_v6_core64_stable_fixed import (
+    V6Core64StableFixedController,
+)
 from cosmos_framework.utils import log
 
 
@@ -55,7 +67,15 @@ def _percentile(values: list[float], q: float) -> float | None:
 
 
 class V53ServerArgs(RobolabServerArgs):
-    ablation_mode: Literal["dense", "a", "c", "c_cond_step0", "c_cond_step0_b0_sparse", "d"] = "c"
+    ablation_mode: Literal[
+        "dense",
+        "a",
+        "c",
+        "c_cond_step0",
+        "c_cond_step0_b0_sparse",
+        "c_core64_stable_fixed_b0_sparse",
+        "d",
+    ] = "c"
     """Closed-loop arm: Dense reference or one optimized V5.3 sparse arm."""
 
     roi_tokens_g1: int = DEFAULT_K80_BUDGETS[0]
@@ -96,6 +116,9 @@ class V53PolicyService(RobolabPolicyService):
             int(args.stable_tokens_g2),
             int(args.stable_tokens_g3),
         )
+        if str(args.ablation_mode) == "c_core64_stable_fixed_b0_sparse":
+            token_budgets = V6_TOKEN_BUDGETS
+            stable_budgets = V6_STABLE_BUDGETS
         if any(not 0 < value <= 340 for value in token_budgets) or not (
             token_budgets[0] >= token_budgets[1] >= token_budgets[2]
         ):
@@ -123,9 +146,14 @@ class V53PolicyService(RobolabPolicyService):
                 controller_cls = {
                     "c_cond_step0": V53CConditionalDenseStep0Controller,
                     "c_cond_step0_b0_sparse": V53CConditionalDenseStep0AllSparseLaterController,
+                    "c_core64_stable_fixed_b0_sparse": V6Core64StableFixedController,
                 }.get(self._mode, V53OptimizedACDController)
                 controller = controller_cls(
-                    ablation_mode=("c" if self._mode in {"c_cond_step0", "c_cond_step0_b0_sparse"} else self._mode),
+                    ablation_mode=(
+                        "c"
+                        if self._mode in {"c_cond_step0", "c_cond_step0_b0_sparse", "c_core64_stable_fixed_b0_sparse"}
+                        else self._mode
+                    ),
                     torch=torch,
                     net=self.model.net,
                     guidance=float(kwargs.get("guidance", self.cfg.guidance)),
@@ -168,6 +196,7 @@ class V53PolicyService(RobolabPolicyService):
                     "dense": "dense",
                     "c_cond_step0": STRATEGY_VERSION,
                     "c_cond_step0_b0_sparse": ALL_SPARSE_LATER_STRATEGY_VERSION,
+                    "c_core64_stable_fixed_b0_sparse": V6_CORE64_STABLE_FIXED_STRATEGY_VERSION,
                 }.get(self._mode, "v5.3"),
                 "ablation_mode": self._mode,
                 "format_prompt_as_json": args.format_prompt_as_json,
@@ -191,11 +220,16 @@ class V53PolicyService(RobolabPolicyService):
 
 
 def serve(args: V53ServerArgs) -> None:
+    displayed_budgets = (
+        V6_TOKEN_BUDGETS
+        if str(args.ablation_mode) == "c_core64_stable_fixed_b0_sparse"
+        else (args.roi_tokens_g1, args.roi_tokens_g2, args.roi_tokens_g3)
+    )
     log.info(
         f"[v5.3-closed-loop-server] host={socket.gethostname()} bind={args.host}:{int(args.port)} "
         f"mode={args.ablation_mode} shift={args.shift} "
         f"json_prompt={args.format_prompt_as_json} "
-        f"budgets={(args.roi_tokens_g1, args.roi_tokens_g2, args.roi_tokens_g3)}"
+        f"budgets={displayed_budgets}"
     )
     service = V53PolicyService(args)
     local_ip = get_local_ip()

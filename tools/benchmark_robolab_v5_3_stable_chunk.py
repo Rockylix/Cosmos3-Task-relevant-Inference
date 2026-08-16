@@ -33,6 +33,9 @@ from cosmos_framework.scripts.robolab_v5_3_c_cond_dense_step0 import (
     V53CConditionalDenseStep0AllSparseLaterController,
     V53CConditionalDenseStep0Controller,
 )
+from cosmos_framework.scripts.robolab_v6_core64_stable_fixed import (
+    V6Core64StableFixedController,
+)
 from tools.run_robolab_step0_fixed_roi_velocity_cache import (
     CHECKPOINT,
     CONDITIONING_IMAGE,
@@ -59,6 +62,7 @@ MODES = (
     "c_opt",
     "c_cond_opt",
     "c_cond_b0_sparse_opt",
+    "c_core64_stable_fixed_opt",
     "d_ref",
     "d_opt",
 )
@@ -98,7 +102,15 @@ def _run_once(args: argparse.Namespace, data_batch: dict[str, Any], label: str) 
     controller = None
     sampler = args.service.model.sampler
     if label != "dense":
-        if label in {"c_cond_opt", "c_cond_b0_sparse_opt"}:
+        if label == "c_core64_stable_fixed_opt":
+            kwargs = _controller_kwargs(args, "c")
+            controller = V6Core64StableFixedController(
+                **kwargs,
+                validate_intermediates=False,
+                enable_nvtx=args.enable_nvtx,
+            )
+            sampler = V53VelocityCacheSampler(args.service.model.sampler, controller)
+        elif label in {"c_cond_opt", "c_cond_b0_sparse_opt"}:
             kwargs = _controller_kwargs(args, "c")
             controller_cls = (
                 V53CConditionalDenseStep0AllSparseLaterController
