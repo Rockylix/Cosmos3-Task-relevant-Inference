@@ -1,4 +1,4 @@
-# 当前稀疏策略简述：V6-A Core64
+# 当前稀疏策略简述：V6-B Direct Core64 → Stable
 
 ## 1. 一句话说明
 
@@ -6,26 +6,28 @@
 future tokens 进入 Transformer 的 Attention 和 MLP，未选背景在 hidden 输出端由 side
 buffer 补齐，并在 UniPC 积分前使用 Step 0 的背景 velocity cache。
 
-当前版本：`v6-a-core64-stable-fixed-k184-152-136`，固定 `shift=5`、4 个 denoise steps。
+当前版本：`v6-b-direct-core64-then-stable-k184-152-136`，固定 `shift=5`、4 个 denoise steps。
 
 ## 2. Mask 如何生成
 
 Step 0 conditional branch 全量计算，并从 B4-B27 采集 Action Query 对 L1-L8 future
 tokens 的 raw attention probability。每个 future frame 独立生成 `17x20=340` token mask。
 
-Mask 分为四部分：
+Mask 按固定顺序生成：
 
-- **Core（64）**：跨高质量 block 聚合出的动作核心区域；
+- **Core（64）**：跨高质量 block 聚合后，每个 future frame 一次性直接 Top-64；
 - **Stable（88/72/64）**：跨 future frames 较稳定的环境区域；
 - **Adaptive**：某一 future frame 相对共享环境更突出的正变化区域；
 - **Fill**：预算仍不足时，按 raw attention mass 补足。
 
-为避免扩大 Core 改变原 Stable，当前先按 Core48 构造并冻结 Stable，再把 Core 扩展到
-64。Mask 从 G3 向 G1 构造，严格保证：
+每个 chunk 只生成一次八张 Core64 mask，后续所有 step、block group 和 CFG branch 固定
+复用。Core64 固定后，Stable 才从八帧 Core64 空间并集之外选取；不存在 Core48 reference
+或 Core48→Core64 的二次扩张。Mask 从 G3 向 G1 构造，严格保证：
 
 `G3 subset G2 subset G1`。
 
-conditional/unconditional 共用同一组 mask；不同 future frame 可以使用不同空间 mask。
+conditional/unconditional 共用同一组 mask；Core、Adaptive 和 Fill 可以随 future frame
+变化，Stable 在同一 group 内由 L1-L8 共用。
 
 ## 3. Token 预算
 
@@ -77,15 +79,23 @@ Step 0 保存完整 guided vision velocity。Step 1-3 在进入 UniPC 更新前�
 此外，Step 0 unconditional 在 ROI 外令 `unconditional = conditional`，即背景 CFG delta
 为零，避免稀疏 unconditional 背景产生无依据的 CFG 放大。
 
-## 6. 当前结果与边界
+## 6. 当前状态与边界
 
-- 稳定单 chunk：`0.566990 s`，相对 Dense `1.508x`；
-- seed 579362556 九任务：V6-A `5/9`，旧 Current C `4/9`；
-- 这只是 9 个单 episode 的 pooled 结果，不能声明稳定成功率提升；
-- Mask 在相邻 future frames 间并非严格对齐，四任务平均 Jaccard 约 `0.59-0.64`；
-- Core/Stable 仍会选择部分角落和图像边界，后续仍有减少无效背景 token 的空间。
+- 本次 Direct Core64→Stable 修改后已完成 seed `579362556` 的两个简单任务冒烟测试：
+  `BananaInBowlTask` 与 `BananaOnPlateTask` 均成功（`2/2`）；
+- 两任务共 11 个 generation chunks，排除首个冷请求后的 generation median
+  `0.573228 s`、P90 `0.592286 s`；该数值只是跨两个任务的闭环 warm chunk 冒烟统计，
+  不是正式配对性能 benchmark；
+- 旧的 `0.566990 s`、`1.508x` 和 `5/9` 属于 Core48→Stable→扩张 Core64 的 V6-A，
+  不能作为当前 V6-B 的结果；
+- Core 在每个 future frame 独立 Top-64，因此不同帧的 Core 空间位置不保证完全一致；
+- Stable 排除八帧 Core64 union，可能改变旧 V6-A 的 Stable 位置，必须重新验证 token
+  组成、attention-mass retention、单 chunk 延迟和闭环成功率。
 
-详细实验：[core64_stable_fixed_adaptive_reduced_cn.md](core64_stable_fixed_adaptive_reduced_cn.md)
+V6-B 两任务报告：
+`/root/robolab/experiments/preliminary/sparsity/velocity_cache/direct_core64_stable_shift5_2tasks_seed579362556_v1/report_cn.md`
+
+旧 V6-A 历史实验：[core64_stable_fixed_adaptive_reduced_cn.md](core64_stable_fixed_adaptive_reduced_cn.md)
 
 四任务 mask overlay：
 `/root/robolab/experiments/preliminary/sparsity/visualization/core64_mask_overlay_4tasks_seed579362556_v1/README.md`

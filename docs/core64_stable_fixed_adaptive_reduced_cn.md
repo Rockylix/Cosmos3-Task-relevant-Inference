@@ -1,4 +1,7 @@
-# Core-64、冻结 Stable、压缩 Adaptive 的 V6-A 实验
+# 历史结果：Core-64、冻结 Stable、压缩 Adaptive 的 V6-A 实验
+
+> 注意：本文件记录旧 V6-A（Core48→Stable→扩张 Core64）的历史结果。当前 worktree
+> 已切换为 V6-B（Direct Core64→Stable）；下述计时、误差和闭环结果不能代表 V6-B。
 
 ## 1. 实验目的
 
