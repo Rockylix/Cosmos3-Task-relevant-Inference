@@ -5,17 +5,27 @@ import torch
 
 from cosmos_framework.scripts.robolab_v5_3_c_cond_dense_step0 import (
     step0_unconditional_group,
+    use_later_group0_from_block0,
     zero_cfg_delta_outside_future_roi,
 )
 
 
 def test_step0_unconditional_uses_g1_for_dense_head_then_normal_groups() -> None:
     groups = ((4, 11), (12, 19), (20, 27))
-    assert [step0_unconditional_group(block, groups) for block in range(28)] == (
-        [0] * 12 + [1] * 8 + [2] * 8
-    )
+    assert [step0_unconditional_group(block, groups) for block in range(28)] == ([0] * 12 + [1] * 8 + [2] * 8)
     with pytest.raises(ValueError, match="outside"):
         step0_unconditional_group(28, groups)
+
+
+def test_later_steps_extend_g1_from_b0_through_b11() -> None:
+    groups = ((4, 11), (12, 19), (20, 27))
+    assert not any(use_later_group0_from_block0(step=0, block=block, groups=groups) for block in range(28))
+    for step in (1, 2, 3):
+        assert [
+            block for block in range(28) if use_later_group0_from_block0(step=step, block=block, groups=groups)
+        ] == list(range(12))
+    with pytest.raises(ValueError, match="non-negative"):
+        use_later_group0_from_block0(step=1, block=-1, groups=groups)
 
 
 @pytest.mark.parametrize("batched", [False, True])

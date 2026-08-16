@@ -30,6 +30,7 @@ from cosmos_framework.scripts.robolab_v5_3_acd_packed_kernel_velocity_cache impo
     V53VelocityCacheSampler,
 )
 from cosmos_framework.scripts.robolab_v5_3_c_cond_dense_step0 import (
+    V53CConditionalDenseStep0AllSparseLaterController,
     V53CConditionalDenseStep0Controller,
 )
 from tools.run_robolab_step0_fixed_roi_velocity_cache import (
@@ -50,7 +51,17 @@ DEFAULT_OUTPUT = Path(
     "/root/robolab/experiments/preliminary/sparsity/velocity_cache/"
     "ac_budget_packed_kernel_shift5_BananaInBowlTask_c3_k80_v1"
 )
-MODES = ("dense", "a_ref", "a_opt", "c_ref", "c_opt", "c_cond_opt", "d_ref", "d_opt")
+MODES = (
+    "dense",
+    "a_ref",
+    "a_opt",
+    "c_ref",
+    "c_opt",
+    "c_cond_opt",
+    "c_cond_b0_sparse_opt",
+    "d_ref",
+    "d_opt",
+)
 
 
 def _percentile(values: list[float], q: float) -> float:
@@ -87,9 +98,14 @@ def _run_once(args: argparse.Namespace, data_batch: dict[str, Any], label: str) 
     controller = None
     sampler = args.service.model.sampler
     if label != "dense":
-        if label == "c_cond_opt":
+        if label in {"c_cond_opt", "c_cond_b0_sparse_opt"}:
             kwargs = _controller_kwargs(args, "c")
-            controller = V53CConditionalDenseStep0Controller(
+            controller_cls = (
+                V53CConditionalDenseStep0AllSparseLaterController
+                if label == "c_cond_b0_sparse_opt"
+                else V53CConditionalDenseStep0Controller
+            )
+            controller = controller_cls(
                 **kwargs,
                 validate_intermediates=False,
                 enable_nvtx=args.enable_nvtx,

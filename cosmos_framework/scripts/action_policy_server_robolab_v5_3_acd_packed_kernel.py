@@ -35,6 +35,9 @@ from cosmos_framework.scripts.robolab_v5_3_acd_packed_kernel_velocity_cache impo
     V53VelocityCacheSampler,
 )
 from cosmos_framework.scripts.robolab_v5_3_c_cond_dense_step0 import (
+    ALL_SPARSE_LATER_STRATEGY_VERSION,
+    STRATEGY_VERSION,
+    V53CConditionalDenseStep0AllSparseLaterController,
     V53CConditionalDenseStep0Controller,
 )
 from cosmos_framework.utils import log
@@ -52,7 +55,7 @@ def _percentile(values: list[float], q: float) -> float | None:
 
 
 class V53ServerArgs(RobolabServerArgs):
-    ablation_mode: Literal["dense", "a", "c", "c_cond_step0", "d"] = "c"
+    ablation_mode: Literal["dense", "a", "c", "c_cond_step0", "c_cond_step0_b0_sparse", "d"] = "c"
     """Closed-loop arm: Dense reference or one optimized V5.3 sparse arm."""
 
     roi_tokens_g1: int = DEFAULT_K80_BUDGETS[0]
@@ -117,13 +120,12 @@ class V53PolicyService(RobolabPolicyService):
             kwargs = dict(generate_kwargs)
             controller = None
             if self._mode != "dense":
-                controller_cls = (
-                    V53CConditionalDenseStep0Controller
-                    if self._mode == "c_cond_step0"
-                    else V53OptimizedACDController
-                )
+                controller_cls = {
+                    "c_cond_step0": V53CConditionalDenseStep0Controller,
+                    "c_cond_step0_b0_sparse": V53CConditionalDenseStep0AllSparseLaterController,
+                }.get(self._mode, V53OptimizedACDController)
                 controller = controller_cls(
-                    ablation_mode="c" if self._mode == "c_cond_step0" else self._mode,
+                    ablation_mode=("c" if self._mode in {"c_cond_step0", "c_cond_step0_b0_sparse"} else self._mode),
                     torch=torch,
                     net=self.model.net,
                     guidance=float(kwargs.get("guidance", self.cfg.guidance)),
@@ -162,13 +164,11 @@ class V53PolicyService(RobolabPolicyService):
             warm = [float(item["generation_wall_s"]) for item in self._summaries[1:]]
             aggregate = {
                 "schema_version": 1,
-                "strategy_version": (
-                    "dense"
-                    if self._mode == "dense"
-                    else "v5.3-c-cond-dense-step0"
-                    if self._mode == "c_cond_step0"
-                    else "v5.3"
-                ),
+                "strategy_version": {
+                    "dense": "dense",
+                    "c_cond_step0": STRATEGY_VERSION,
+                    "c_cond_step0_b0_sparse": ALL_SPARSE_LATER_STRATEGY_VERSION,
+                }.get(self._mode, "v5.3"),
                 "ablation_mode": self._mode,
                 "format_prompt_as_json": args.format_prompt_as_json,
                 "compile": False,
