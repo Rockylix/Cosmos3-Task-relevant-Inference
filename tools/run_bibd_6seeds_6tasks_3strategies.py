@@ -202,6 +202,11 @@ def make_environment() -> dict[str, str]:
             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
             "OMNI_KIT_ACCEPT_EULA": "Y",
             "PYTHONUNBUFFERED": "1",
+            # The policy server is local.  Never route its long-lived WebSocket
+            # through the machine's HTTP proxy; proxy resets otherwise look like
+            # random mid-episode policy-server failures.
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
         }
     )
     return env
@@ -233,7 +238,17 @@ def write_runtime_manifest() -> None:
     )
 
 
-def run_job(strategy: str, seed: int, pair: str) -> None:
+def next_attempt_index(job_dir: Path) -> int:
+    indices = []
+    for path in job_dir.glob("server_attempt_*"):
+        try:
+            indices.append(int(path.name.rsplit("_", 1)[1]))
+        except ValueError:
+            pass
+    return max(indices, default=0) + 1
+
+
+def run_job_attempt(strategy: str, seed: int, pair: str, attempt: int) -> None:
     tasks = tasks_for_pair(pair)
     output_name = f"bibd6x6_{strategy}_seed{seed}_v1"
     done = completed_tasks(output_name)
@@ -242,16 +257,16 @@ def run_job(strategy: str, seed: int, pair: str) -> None:
         return
 
     job_dir = EXPERIMENT_ROOT / "closed_loop" / strategy / f"seed_{seed}"
-    server_dir = job_dir / "server"
+    server_dir = job_dir / f"server_attempt_{attempt:03d}"
     log_dir = EXPERIMENT_ROOT / "logs"
     server_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
-    server_log = log_dir / f"server_{strategy}_seed{seed}.log"
-    simulator_log = log_dir / f"simulator_{strategy}_seed{seed}.log"
+    server_log = log_dir / f"server_{strategy}_seed{seed}_attempt{attempt:03d}.log"
+    simulator_log = log_dir / f"simulator_{strategy}_seed{seed}_attempt{attempt:03d}.log"
     env = make_environment()
 
     print(
-        f"[runner] START strategy={strategy} seed={seed} pair={pair} "
+        f"[runner] START strategy={strategy} seed={seed} pair={pair} attempt={attempt} "
         f"remaining={len(set(tasks) - done)}/6",
         flush=True,
     )
@@ -309,6 +324,24 @@ def run_job(strategy: str, seed: int, pair: str) -> None:
         print(f"[runner] DONE strategy={strategy} seed={seed} tasks=6/6", flush=True)
     finally:
         stop_process_group(server, "policy server")
+
+
+def run_job(strategy: str, seed: int, pair: str, max_attempts: int = 3) -> None:
+    job_dir = EXPERIMENT_ROOT / "closed_loop" / strategy / f"seed_{seed}"
+    first_attempt = next_attempt_index(job_dir)
+    for offset in range(max_attempts):
+        attempt = first_attempt + offset
+        try:
+            run_job_attempt(strategy, seed, pair, attempt)
+            return
+        except RuntimeError as exc:
+            if offset + 1 >= max_attempts:
+                raise
+            print(
+                f"[runner] RETRY strategy={strategy} seed={seed} "
+                f"after recoverable attempt failure: {exc}",
+                flush=True,
+            )
 
 
 def job_order() -> list[tuple[str, int, str]]:
