@@ -157,3 +157,20 @@ task 一个 episode 只能形成 pooled success rate，不能当作稳定 per-ta
 
 第一轮不调整 Core block count、block quality 公式、Stable CV penalty 或 temporal smoothing。
 这些属于第二轮算法参数，必须在 Core/Stable 配额确定后再单独消融。
+
+## 11. 2026-08-16 双简单任务首轮筛选
+
+固定 `K=(184,152,136)`、环境 seed 0、policy seed 579362556，在
+`BananaInBowlTask` 与 `RubiksCubeTask` 上各跑一个 episode：
+
+| 候选 | Core | Stable | 闭环结果 |
+|---|---:|---:|---:|
+| A0 | 64 | 88/72/64 | 1/2 |
+| A1 | 80 | 72/56/48 | 1/2 |
+| A2 | 96 | 56/40/32 | **2/2** |
+| A3 | 112 | 40/24/16 | 1/2 |
+
+本轮仅用于筛选。A2 是唯一完成两个任务的候选，说明扩大 Core 的收益在当前样本上不是单调的：
+Core112 同时把 Stable 压到 40/24/16 后，RubiksCube 再次失败。下一轮优先复核 A2，暂不继续
+增加 Core；完整报告位于
+`experiments/preliminary/sparsity/velocity_cache/core_stable_alloc_2simple_seed579362556_v1/report_cn.md`。

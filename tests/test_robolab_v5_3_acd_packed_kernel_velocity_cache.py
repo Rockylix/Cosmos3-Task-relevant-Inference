@@ -41,6 +41,8 @@ def test_v53_closed_loop_defaults_and_percentile() -> None:
     args = V53ServerArgs()
     assert args.ablation_mode == "c"
     assert (args.roi_tokens_g1, args.roi_tokens_g2, args.roi_tokens_g3) == (192, 160, 144)
+    assert args.stable_reference_core_token_budget is None
+    assert V53ServerArgs(stable_reference_core_token_budget=48).stable_reference_core_token_budget == 48
     assert _percentile([], 0.9) is None
     assert _percentile([1.0, 2.0, 3.0], 0.9) == pytest.approx(2.8)
 

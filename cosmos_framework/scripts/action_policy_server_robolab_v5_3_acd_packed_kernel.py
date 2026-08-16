@@ -89,6 +89,8 @@ class V53ServerArgs(RobolabServerArgs):
     stable_tokens_g3: int = DEFAULT_STABLE_BUDGETS[2]
     core_block_count: int = DEFAULT_CORE_BLOCK_COUNT
     core_token_budget: int = DEFAULT_CORE_TOKEN_BUDGET
+    stable_reference_core_token_budget: int | None = None
+    """Build Stable against this Core budget, then expand to ``core_token_budget``."""
     stable_cv_penalty: float = DEFAULT_STABLE_CV_PENALTY
     replacement_relative_threshold: float = DEFAULT_REPLACEMENT_RELATIVE_THRESHOLD
     max_replacements: int = DEFAULT_MAX_REPLACEMENTS
@@ -172,6 +174,7 @@ class V53PolicyService(RobolabPolicyService):
                     stable_budgets=self._stable_budgets,
                     core_block_count=int(args.core_block_count),
                     core_token_budget=int(args.core_token_budget),
+                    stable_reference_core_token_budget=args.stable_reference_core_token_budget,
                     stable_cv_penalty=float(args.stable_cv_penalty),
                     replacement_relative_threshold=float(args.replacement_relative_threshold),
                     max_replacements=int(args.max_replacements),
