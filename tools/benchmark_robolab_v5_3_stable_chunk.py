@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stable single-chunk benchmark for V5.2 reference and V5.3 optimized A/C/D."""
+"""Stable single-chunk benchmark for dense and selected sparse strategies."""
 
 from __future__ import annotations
 
@@ -36,6 +36,10 @@ from cosmos_framework.scripts.robolab_v5_3_c_cond_dense_step0 import (
 from cosmos_framework.scripts.robolab_v6_core64_stable_fixed import (
     V6Core64StableFixedController,
 )
+from cosmos_framework.scripts.robolab_step0_fixed_roi_velocity_cache import (
+    GuidedBackgroundVelocityCacheSampler,
+    Step0FixedROISparseController,
+)
 from tools.run_robolab_step0_fixed_roi_velocity_cache import (
     CHECKPOINT,
     CONDITIONING_IMAGE,
@@ -56,6 +60,7 @@ DEFAULT_OUTPUT = Path(
 )
 MODES = (
     "dense",
+    "version1",
     "a_ref",
     "a_opt",
     "c_ref",
@@ -102,7 +107,18 @@ def _run_once(args: argparse.Namespace, data_batch: dict[str, Any], label: str) 
     controller = None
     sampler = args.service.model.sampler
     if label != "dense":
-        if label == "c_core64_stable_fixed_opt":
+        if label == "version1":
+            controller = Step0FixedROISparseController(
+                torch=torch,
+                net=args.service.model.net,
+                guidance=args.guidance,
+                num_steps=args.num_steps,
+                threshold=args.version1_mass_threshold,
+                first_sparse_block=args.version1_first_sparse_block,
+                output_dir=None,
+            )
+            sampler = GuidedBackgroundVelocityCacheSampler(args.service.model.sampler, controller)
+        elif label == "c_core64_stable_fixed_opt":
             kwargs = _controller_kwargs(args, "c")
             controller = V6Core64StableFixedController(
                 **kwargs,
@@ -177,7 +193,7 @@ def _output_metrics(reference: dict[str, Any], candidate: dict[str, Any]) -> dic
 
 def _report(result: dict[str, Any]) -> str:
     lines = [
-        "# A/C/D packed-kernel 稳定单 chunk benchmark",
+        "# Dense / sparse 策略稳定单 chunk benchmark",
         "",
         "主计时口径：同一已加载模型，compile/CUDA graph 关闭；每个 mode 预热后交替运行，",
         "CUDA 同步包围 `generate_samples_from_batch`，只报告稳定单 chunk median/P90。",
@@ -230,6 +246,8 @@ def main() -> None:
     parser.add_argument("--stable-budgets", type=int, nargs=3, default=DEFAULT_STABLE_BUDGETS)
     parser.add_argument("--core-block-count", type=int, default=DEFAULT_CORE_BLOCK_COUNT)
     parser.add_argument("--core-token-budget", type=int, default=DEFAULT_CORE_TOKEN_BUDGET)
+    parser.add_argument("--version1-mass-threshold", type=float, default=0.9)
+    parser.add_argument("--version1-first-sparse-block", type=int, default=4)
     parser.add_argument("--stable-cv-penalty", type=float, default=DEFAULT_STABLE_CV_PENALTY)
     parser.add_argument("--replacement-relative-threshold", type=float, default=DEFAULT_REPLACEMENT_RELATIVE_THRESHOLD)
     parser.add_argument("--max-replacements", type=int, default=DEFAULT_MAX_REPLACEMENTS)

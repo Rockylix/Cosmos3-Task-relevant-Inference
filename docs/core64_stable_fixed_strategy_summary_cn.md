@@ -81,11 +81,12 @@ Step 0 保存完整 guided vision velocity。Step 1-3 在进入 UniPC 更新前�
 
 ## 6. 当前状态与边界
 
-- 本次 Direct Core64→Stable 修改后已完成 seed `579362556` 的两个简单任务冒烟测试：
-  `BananaInBowlTask` 与 `BananaOnPlateTask` 均成功（`2/2`）；
-- 两任务共 11 个 generation chunks，排除首个冷请求后的 generation median
-  `0.573228 s`、P90 `0.592286 s`；该数值只是跨两个任务的闭环 warm chunk 冒烟统计，
-  不是正式配对性能 benchmark；
+- 已完成 6 policy seeds、12-task 平衡任务池、每策略 36 episodes 的正式配对评估：V6-B
+  `14/36`，Dense `14/36`，Version1 `13/36`；V6-B 相对 Dense 有 5 个单元获益、5 个单元
+  损失，因此不能解释为逐 episode 等价；
+- RTX 4090 同模型预热单 chunk benchmark 中，V6-B median `0.571400 s`、P90
+  `0.574525 s`，相对 Dense `0.857823 s` 为 `1.501x`；
+- seed `579362556` 的两个简单任务 `2/2` 只保留为早期冒烟记录，不作为正式成功率；
 - 旧的 `0.566990 s`、`1.508x` 和 `5/9` 属于 Core48→Stable→扩张 Core64 的 V6-A，
   不能作为当前 V6-B 的结果；
 - Core 在每个 future frame 独立 Top-64，因此不同帧的 Core 空间位置不保证完全一致；
@@ -94,6 +95,8 @@ Step 0 保存完整 guided vision velocity。Step 1-3 在进入 UniPC 更新前�
 
 V6-B 两任务报告：
 `/root/robolab/experiments/preliminary/sparsity/velocity_cache/direct_core64_stable_shift5_2tasks_seed579362556_v1/report_cn.md`
+
+V6-B 6-seed BIBD 正式评估：[direct_core64_bibd_6seeds_evaluation_cn.md](direct_core64_bibd_6seeds_evaluation_cn.md)
 
 旧 V6-A 历史实验：[core64_stable_fixed_adaptive_reduced_cn.md](core64_stable_fixed_adaptive_reduced_cn.md)
 
