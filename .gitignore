@@ -218,3 +218,7 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Local generated experiment artifacts are never committed. Reproducibility
+# parameters and result summaries belong in docs/experiments instead.
+/experiments/
