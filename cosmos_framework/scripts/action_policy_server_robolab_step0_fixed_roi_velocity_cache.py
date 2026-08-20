@@ -36,7 +36,7 @@ class Step0FixedROIServerArgs(RobolabServerArgs):
     """First sparse Transformer block for denoise steps after step 0."""
 
     intervention_output_dir: Path = Path(
-        "/root/robolab/experiments/preliminary/sparsity/velocity_cache/"
+        "/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/"
         "step0_profile_fixed_roi_velocity_cache_shift5_BananaInBowlTask_sim_v1/server"
     )
     """Request-level ROI, velocity-cache, token and timing artifacts."""

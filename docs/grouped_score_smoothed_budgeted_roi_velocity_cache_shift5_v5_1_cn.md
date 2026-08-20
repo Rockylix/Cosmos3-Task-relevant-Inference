@@ -122,7 +122,7 @@ HF_HUB_OFFLINE=1 PYTHONPATH=$PWD \
   --strategy-version v5.1 \
   --group-token-budgets 240 200 180 \
   --shift 5 \
-  --output-root /root/robolab/experiments/preliminary/sparsity/velocity_cache/<run-id>
+  --output-root /root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/<run-id>
 ```
 
 Server：
@@ -139,7 +139,7 @@ HF_HUB_OFFLINE=1 LD_LIBRARY_PATH='' PYTHONPATH=$PWD \
   --deterministic-seed --seed 579362556 \
   --host 0.0.0.0 --port 8000 \
   --roi-tokens-g1 240 --roi-tokens-g2 200 --roi-tokens-g3 180 \
-  --intervention-output-dir /root/robolab/experiments/preliminary/sparsity/velocity_cache/<server-run-id>
+  --intervention-output-dir /root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/<server-run-id>
 ```
 
 RoboLab：

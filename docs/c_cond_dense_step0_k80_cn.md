@@ -42,7 +42,7 @@ cd /root/robolab/worktrees/c-cond-dense-step0-k80
 HF_HOME=/root/cosmos3/cosmos/checkpoints/hf_home HF_HUB_OFFLINE=1 PYTHONPATH=. \
 /root/cosmos3/cosmos/packages/cosmos3/.venv/bin/python \
   tools/benchmark_robolab_v5_3_stable_chunk.py \
-  --output-root /root/robolab/experiments/preliminary/sparsity/velocity_cache/c_cond_dense_step0_k80_BananaInBowlTask_c3_v1 \
+  --output-root /root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/c_cond_dense_step0_k80_BananaInBowlTask_c3_v1 \
   --group-token-budgets 192 160 144 \
   --modes dense c_opt c_cond_opt \
   --warmup-rounds 3 --measure-rounds 20
@@ -70,7 +70,7 @@ NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
   --host 127.0.0.1 --port 8000 --format-prompt-as-json True --no-guardrails \
   --seed 579362556 --deterministic-seed --guidance 3.0 --num-steps 4 --shift 5.0 \
   --ablation-mode c_cond_step0 \
-  --intervention-output-dir /root/robolab/experiments/preliminary/sparsity/velocity_cache/c_cond_dense_step0_k80_BananaInBowlTask_seed579362556_v1/server
+  --intervention-output-dir /root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/c_cond_dense_step0_k80_BananaInBowlTask_seed579362556_v1/server
 ```
 
 RoboLab：
@@ -116,7 +116,7 @@ OMNI_KIT_ACCEPT_EULA=Y CUDA_VISIBLE_DEVICES=0 \
 完整报告：
 
 ```text
-/root/robolab/experiments/preliminary/sparsity/velocity_cache/c_cond_dense_step0_k80_9tasks_seed579362556_v1/report_cn.md
+/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/c_cond_dense_step0_k80_9tasks_seed579362556_v1/report_cn.md
 ```
 
 ## 结论边界

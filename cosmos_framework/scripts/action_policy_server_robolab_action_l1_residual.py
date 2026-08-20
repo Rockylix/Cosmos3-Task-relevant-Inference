@@ -19,7 +19,7 @@ def main() -> None:
         sys.argv.extend(
             [
                 "--intervention-output-dir",
-                "/root/robolab/experiments/preliminary/sparsity/action_attention_l1_residual/"
+                "/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/action_attention_l1_residual/"
                 "action_attention_current_block_mass90_l1_residual_shift5_BananaInBowlTask_sim_v1/server",
             ]
         )

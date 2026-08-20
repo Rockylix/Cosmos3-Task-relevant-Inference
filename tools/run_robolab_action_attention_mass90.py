@@ -27,7 +27,7 @@ from cosmos_framework.scripts.robolab_action_attention_mass90_intervention impor
 
 CHECKPOINT = Path("/root/robolab/RoboLab/Cosmos3-Edge-Policy-DROID")
 CONDITIONING_IMAGE = Path(
-    "/root/robolab/experiments/preliminary/representation/hidden_states/"
+    "/root/robolab/cosmos-framework-edge/experiments/preliminary/representation/hidden_states/"
     "edge_hidden_banana_bowl_plate_c357_v1/"
     "task_pick_up_the_banana_and_place_it_in_the_bowl_dc79626d/"
     "chunk_000003/conditioning_observation.png"
@@ -36,7 +36,7 @@ EPISODE_HDF5 = Path(
     "/root/robolab/RoboLab/output/cosmos3_edge_hidden_banana_bowl_plate_c357_v1/BananaInBowlTask/run_0.hdf5"
 )
 OUTPUT_ROOT = Path(
-    "/root/robolab/experiments/preliminary/sparsity/action_attention_mass90/"
+    "/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/action_attention_mass90/"
     "action_attention_mass90_sharedmask_BananaInBowlTask_c3_shift1_v1"
 )
 PROMPT = "Pick up the banana and place it in the bowl"

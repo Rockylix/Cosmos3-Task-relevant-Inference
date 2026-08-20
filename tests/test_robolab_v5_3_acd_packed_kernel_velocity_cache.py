@@ -49,9 +49,12 @@ def test_searchsorted_subset_handles_empty_target() -> None:
     assert result.numel() == 0
 
 
-def test_v53_closed_loop_defaults_and_percentile() -> None:
+def test_version1_branch_defaults_and_keeps_legacy_mode_alias() -> None:
     args = V53ServerArgs()
-    assert args.ablation_mode == "c"
+    assert args.ablation_mode == "version1"
+    assert V53ServerArgs(ablation_mode="c_core64_stable_fixed_b0_sparse").ablation_mode == (
+        "c_core64_stable_fixed_b0_sparse"
+    )
     assert (args.roi_tokens_g1, args.roi_tokens_g2, args.roi_tokens_g3) == (192, 160, 144)
     assert args.stable_reference_core_token_budget is None
     assert V53ServerArgs(stable_reference_core_token_budget=48).stable_reference_core_token_budget == 48

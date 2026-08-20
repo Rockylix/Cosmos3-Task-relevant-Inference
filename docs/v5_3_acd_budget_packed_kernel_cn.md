@@ -124,7 +124,7 @@ K80/C 为每个 step、CFG branch、block 以及 group pack/commit/restore 添�
 NSys 产物：
 
 ```text
-/root/robolab/experiments/preliminary/sparsity/velocity_cache/
+/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/
 ac_budget_packed_kernel_shift5_BananaInBowlTask_c3_k80_nsys_v1/
   c_opt_k80.nsys-rep
   stats_nvtx_gpu_proj_sum.csv
@@ -161,28 +161,28 @@ ac_budget_packed_kernel_shift5_BananaInBowlTask_c3_k80_nsys_v1/
 
 ## C/D K80 九任务闭环
 
-按与历史 Baseline/Version1 相同的九任务列表和协议，固定环境 seed `0`、policy seed `579362556`，对 C/D K80 各运行每任务一个 episode。成功严格读取 `episode_results.jsonl` 的 `success` 字段。
+按与历史 Baseline/Legacy ROI velocity cache 相同的九任务列表和协议，固定环境 seed `0`、policy seed `579362556`，对 C/D K80 各运行每任务一个 episode。成功严格读取 `episode_results.jsonl` 的 `success` 字段。
 
 | Strategy | Success | Stable chunk median | Speedup vs same-run Dense |
 |---|---:|---:|---:|
 | Baseline（历史配对） | 3/9 | 0.8695 s（历史表） | 1.00x |
-| Version1（历史配对） | 5/9 | 0.711 s（历史表） | 1.21x（历史表） |
+| Legacy ROI velocity cache（历史配对） | 5/9 | 0.711 s（历史表） | 1.21x（历史表） |
 | V5.3 C / K80 | **5/9** | **0.684670 s** | **1.258x** |
 | V5.3 D / K80 | **3/9** | **0.684359 s** | **1.258x** |
 
-C 成功任务为 `BananaInBowlTask`、`BananaOnPlateTask`、`RubiksCubeTask`、`RubiksCubeAndBananaTask`、`FruitsOnPlate3Task`。D 成功任务为 `BananaInBowlTask`、`BananaOnPlateTask`、`YogurtInBowlTask`。C 与 Version1 虽同为 5/9，但逐任务成功集合不同；D 的 `BananaOnPlateTask` 成功也需要 535 步，明显慢于 C 的 171 步。
+C 成功任务为 `BananaInBowlTask`、`BananaOnPlateTask`、`RubiksCubeTask`、`RubiksCubeAndBananaTask`、`FruitsOnPlate3Task`。D 成功任务为 `BananaInBowlTask`、`BananaOnPlateTask`、`YogurtInBowlTask`。C 与 Legacy ROI velocity cache 虽同为 5/9，但逐任务成功集合不同；D 的 `BananaOnPlateTask` 成功也需要 535 步，明显慢于 C 的 171 步。
 
 完整逐任务结果、原始服务端产物与计时边界见：
 
 ```text
-/root/robolab/experiments/preliminary/sparsity/velocity_cache/
+/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/
 acd_packed_kernel_k80_9tasks_seed579362556_v1/
 ```
 
 完整数值、原始服务端 request 计时和视频位于：
 
 ```text
-/root/robolab/experiments/preliminary/sparsity/velocity_cache/
+/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/
 acd_packed_kernel_k80_BananaInBowlTask_seed579362556_v1/
 ```
 
@@ -196,7 +196,7 @@ HF_HOME=/root/cosmos3/cosmos/checkpoints/hf_home \
 HF_HUB_OFFLINE=1 PYTHONPATH=. \
 /root/cosmos3/cosmos/packages/cosmos3/.venv/bin/python \
   tools/benchmark_robolab_v5_3_stable_chunk.py \
-  --output-root /root/robolab/experiments/preliminary/sparsity/velocity_cache/\
+  --output-root /root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/\
 ac_budget_packed_kernel_shift5_BananaInBowlTask_c3_k80_v2 \
   --group-token-budgets 192 160 144 \
   --modes dense a_ref a_opt c_ref c_opt d_ref d_opt \

@@ -23,8 +23,8 @@ from tools.run_bibd_6seeds_6tasks_3strategies import (
 STRATEGIES = ("baseline", "version1", "direct_core64")
 DISPLAY_NAMES = {
     "baseline": "Dense baseline",
-    "version1": "Version1",
-    "direct_core64": "Direct Core64 + Stable (V6-B)",
+    "version1": "Legacy ROI velocity cache",
+    "direct_core64": "Version1",
 }
 
 
@@ -249,7 +249,7 @@ def build_report(
     overall_by = {row["strategy"]: row for row in overall}
     timing_by = {row["strategy"]: row for row in closed_timing}
     lines = [
-        "# Dense / Version1 / Direct Core64+Stable 多 seed 闭环对比",
+        "# Dense / Legacy ROI velocity cache / Version1 多 seed 闭环对比",
         "",
         "## 闭环主结果",
         "",
@@ -353,8 +353,8 @@ def build_report(
         dense_median = float(stable_metrics["timing"]["dense"]["median_s"])
         stable_names = {
             "dense": "Dense baseline",
-            "version1": "Version1",
-            "c_core64_stable_fixed_opt": "Direct Core64 + Stable (V6-B)",
+            "version1": "Legacy ROI velocity cache",
+            "c_core64_stable_fixed_opt": "Version1",
         }
         for mode in stable_metrics["modes"]:
             row = stable_metrics["timing"][mode]

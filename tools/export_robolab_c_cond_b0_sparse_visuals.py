@@ -39,7 +39,7 @@ from tools.run_robolab_step0_fixed_roi_velocity_cache import (
 )
 
 DEFAULT_OUTPUT = Path(
-    "/root/robolab/experiments/preliminary/sparsity/visualization/"
+    "/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/visualization/"
     "all_sparse_later_future_overlay_BananaInBowlTask_c3_v1"
 )
 

@@ -1,7 +1,7 @@
 # 历史结果：Core-64、冻结 Stable、压缩 Adaptive 的 V6-A 实验
 
 > 注意：本文件记录旧 V6-A（Core48→Stable→扩张 Core64）的历史结果。当前 worktree
-> 已切换为 V6-B（Direct Core64→Stable）；下述计时、误差和闭环结果不能代表 V6-B。
+> 已切换为 Version1（Direct Core64→Stable）；下述计时、误差和闭环结果不能代表 Version1。
 
 ## 1. 实验目的
 
@@ -97,9 +97,9 @@ seed 不退化。
 ## 7. 输出位置
 
 - 单 chunk：
-  `/root/robolab/experiments/preliminary/sparsity/velocity_cache/core64_stable_fixed_k184_152_136_BananaInBowlTask_c3_v1/`
+  `/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/core64_stable_fixed_k184_152_136_BananaInBowlTask_c3_v1/`
 - 闭环服务端：
-  `/root/robolab/experiments/preliminary/sparsity/velocity_cache/core64_stable_fixed_k184_152_136_BananaInBowlTask_seed579362556_v1/server/`
+  `/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/core64_stable_fixed_k184_152_136_BananaInBowlTask_seed579362556_v1/server/`
 - viewport 视频：
   `/root/robolab/RoboLab/output/core64_stable_fixed_k184_152_136_BananaInBowlTask_seed579362556_v1/BananaInBowlTask/Pick_up_the_banana_and_place_it_in_the_bowl_0_viewport.mp4`
 
@@ -108,11 +108,11 @@ seed 不退化。
 稳定单 chunk：
 
 ```bash
-cd /root/robolab/worktrees/core64-stable-fixed-k184-152-136
+cd /root/robolab/cosmos-framework-edge-version1
 HF_HOME=/root/cosmos3/cosmos/checkpoints/hf_home HF_HUB_OFFLINE=1 PYTHONPATH=. \
 LD_LIBRARY_PATH= /root/cosmos3/cosmos/packages/cosmos3/.venv/bin/python \
   tools/benchmark_robolab_v5_3_stable_chunk.py \
-  --output-root /root/robolab/experiments/preliminary/sparsity/velocity_cache/<new-run-id> \
+  --output-root /root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/<new-run-id> \
   --modes dense c_cond_b0_sparse_opt c_core64_stable_fixed_opt \
   --warmup-rounds 3 --measure-rounds 20
 ```
@@ -120,7 +120,7 @@ LD_LIBRARY_PATH= /root/cosmos3/cosmos/packages/cosmos3/.venv/bin/python \
 闭环 policy server：
 
 ```bash
-cd /root/robolab/worktrees/core64-stable-fixed-k184-152-136
+cd /root/robolab/cosmos-framework-edge-version1
 HF_HOME=/root/cosmos3/cosmos/checkpoints/hf_home HF_HUB_OFFLINE=1 PYTHONPATH=. \
 LD_LIBRARY_PATH= NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
 /root/cosmos3/cosmos/packages/cosmos3/.venv/bin/python -m \
@@ -130,7 +130,7 @@ LD_LIBRARY_PATH= NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
   --seed 579362556 --deterministic-seed --guidance 3.0 \
   --num-steps 4 --shift 5.0 \
   --ablation-mode c_core64_stable_fixed_b0_sparse \
-  --intervention-output-dir /root/robolab/experiments/preliminary/sparsity/velocity_cache/<new-run-id>/server
+  --intervention-output-dir /root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/<new-run-id>/server
 ```
 
 RoboLab：
@@ -161,4 +161,4 @@ V6-A 额外成功 `RubiksCubesInBinTask`；其余八项胜负与 Current C 相�
 
 完整逐任务表、闭环 warm 请求计时、token 统计与异常说明：
 
-`/root/robolab/experiments/preliminary/sparsity/velocity_cache/core64_stable_fixed_9tasks_seed579362556_v1/report_cn.md`
+`/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/core64_stable_fixed_9tasks_seed579362556_v1/report_cn.md`

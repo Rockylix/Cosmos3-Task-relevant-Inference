@@ -132,7 +132,7 @@ LD_LIBRARY_PATH='' \
 PYTHONPATH=$PWD \
 /root/cosmos3/cosmos/packages/cosmos3/.venv/bin/python \
   -m tools.run_robolab_v5_2_motion_core_stable_adaptive \
-  --output-root /root/robolab/experiments/preliminary/sparsity/velocity_cache/\
+  --output-root /root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/\
 v5_2_motion_core_stable_adaptive_k80_BananaInBowlTask_c3_v1
 ```
 
@@ -245,7 +245,7 @@ PYTHONPATH=$PWD \
   --format-prompt-as-json True \
   --ablation-mode "$MODE" \
   --intervention-output-dir \
-    "/root/robolab/experiments/preliminary/sparsity/velocity_cache/\
+    "/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/\
 v5_2_motion_core_stable_adaptive_k80_5tasks_seed579362556_json_v1/$MODE/server"
 ```
 
@@ -274,7 +274,7 @@ OMNI_KIT_ACCEPT_EULA=Y NO_PROXY=127.0.0.1,localhost \
 cd /root/robolab/worktrees/v5-2-motion-core-stable-adaptive-k80
 LD_LIBRARY_PATH='' /root/cosmos3/cosmos/packages/cosmos3/.venv/bin/python \
   -m tools.summarize_robolab_v5_2_closed_loop \
-  --experiment-root /root/robolab/experiments/preliminary/sparsity/velocity_cache/\
+  --experiment-root /root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/\
 v5_2_motion_core_stable_adaptive_k80_5tasks_seed579362556_json_v1 \
   --robolab-output-root /root/robolab/RoboLab/output \
   --seed 579362556 \
@@ -285,7 +285,7 @@ v5_2_motion_core_stable_adaptive_k80_5tasks_seed579362556_json_v1 \
 闭环 CSV、中文报告和每个 request 的 token 数据位于：
 
 ```text
-/root/robolab/experiments/preliminary/sparsity/velocity_cache/
+/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/
 v5_2_motion_core_stable_adaptive_k80_5tasks_seed579362556_json_v1/
 ```
 
@@ -317,6 +317,6 @@ v5_2_k80_dense_shift5_5tasks_seed579362556_v1/<task>/*_viewport.mp4
 完整结果位于：
 
 ```text
-/root/robolab/experiments/preliminary/sparsity/velocity_cache/
+/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/
 v5_2_motion_core_stable_adaptive_k80_BananaInBowlTask_c3_v1/
 ```

@@ -50,7 +50,7 @@ class V52ServerArgs(RobolabServerArgs):
     replacement_relative_threshold: float = DEFAULT_REPLACEMENT_RELATIVE_THRESHOLD
     max_replacements: int = DEFAULT_MAX_REPLACEMENTS
     intervention_output_dir: Path = Path(
-        "/root/robolab/experiments/preliminary/sparsity/velocity_cache/"
+        "/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/"
         "v5_2_motion_core_stable_adaptive_k80_5tasks_v1/server"
     )
 

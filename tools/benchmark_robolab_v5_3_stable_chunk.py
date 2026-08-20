@@ -55,7 +55,7 @@ from tools.run_robolab_step0_fixed_roi_velocity_cache import (
 )
 
 DEFAULT_OUTPUT = Path(
-    "/root/robolab/experiments/preliminary/sparsity/velocity_cache/"
+    "/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/"
     "ac_budget_packed_kernel_shift5_BananaInBowlTask_c3_k80_v1"
 )
 MODES = (

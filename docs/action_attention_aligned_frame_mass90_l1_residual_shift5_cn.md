@@ -92,7 +92,7 @@ H_out[Lf,p] = H_in[Lf,p] + R_L1[p], p not in M_f
 产物：
 
 ```text
-/root/robolab/experiments/preliminary/sparsity/action_attention_l1_residual/
+/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/action_attention_l1_residual/
   action_attention_aligned_frame_mass90_l1_residual_shift5_BananaInBowlTask_c3_v1/
 ```
 

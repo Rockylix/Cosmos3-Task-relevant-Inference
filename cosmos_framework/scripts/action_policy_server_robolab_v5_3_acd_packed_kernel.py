@@ -44,16 +44,16 @@ from cosmos_framework.scripts.robolab_v5_3_c_cond_dense_step0 import (
     V53CConditionalDenseStep0Controller,
 )
 from cosmos_framework.scripts.robolab_v6_core64_stable_fixed import (
-    STABLE_BUDGETS as V6_STABLE_BUDGETS,
+    STABLE_BUDGETS as VERSION1_STABLE_BUDGETS,
 )
 from cosmos_framework.scripts.robolab_v6_core64_stable_fixed import (
-    STRATEGY_VERSION as V6_CORE64_STABLE_FIXED_STRATEGY_VERSION,
+    STRATEGY_VERSION as VERSION1_STRATEGY_VERSION,
 )
 from cosmos_framework.scripts.robolab_v6_core64_stable_fixed import (
-    TOKEN_BUDGETS as V6_TOKEN_BUDGETS,
+    TOKEN_BUDGETS as VERSION1_TOKEN_BUDGETS,
 )
 from cosmos_framework.scripts.robolab_v6_core64_stable_fixed import (
-    V6Core64StableFixedController,
+    Version1Core64StableFixedController,
 )
 from cosmos_framework.scripts.robolab_v7_direct_core96_weighted_g1_b0 import (
     STABLE_BUDGETS as V7_STABLE_BUDGETS,
@@ -94,12 +94,13 @@ class V53ServerArgs(RobolabServerArgs):
         "c",
         "c_cond_step0",
         "c_cond_step0_b0_sparse",
+        "version1",
         "c_core64_stable_fixed_b0_sparse",
         "c_direct_core96_weighted_g1_b0",
         "c_core96_coverage_stable_fill",
         "d",
-    ] = "c"
-    """Closed-loop arm: Dense reference or one optimized V5.3 sparse arm."""
+    ] = "version1"
+    """Closed-loop arm; Version1 is the canonical default in this branch."""
 
     roi_tokens_g1: int = DEFAULT_K80_BUDGETS[0]
     roi_tokens_g2: int = DEFAULT_K80_BUDGETS[1]
@@ -119,7 +120,7 @@ class V53ServerArgs(RobolabServerArgs):
     capture_first_mask_overlay_per_prompt: bool = False
     """Decode and save L1-L8 frames for the first request of each distinct prompt."""
     intervention_output_dir: Path = Path(
-        "/root/robolab/experiments/preliminary/sparsity/velocity_cache/"
+        "/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/"
         "acd_packed_kernel_k80_1task_seed579362556_v1/server"
     )
 
@@ -143,9 +144,9 @@ class V53PolicyService(RobolabPolicyService):
             int(args.stable_tokens_g2),
             int(args.stable_tokens_g3),
         )
-        if str(args.ablation_mode) == "c_core64_stable_fixed_b0_sparse":
-            token_budgets = V6_TOKEN_BUDGETS
-            stable_budgets = V6_STABLE_BUDGETS
+        if str(args.ablation_mode) in {"version1", "c_core64_stable_fixed_b0_sparse"}:
+            token_budgets = VERSION1_TOKEN_BUDGETS
+            stable_budgets = VERSION1_STABLE_BUDGETS
         elif str(args.ablation_mode) in {
             "c_direct_core96_weighted_g1_b0",
             "c_core96_coverage_stable_fill",
@@ -183,7 +184,8 @@ class V53PolicyService(RobolabPolicyService):
                 controller_cls = {
                     "c_cond_step0": V53CConditionalDenseStep0Controller,
                     "c_cond_step0_b0_sparse": V53CConditionalDenseStep0AllSparseLaterController,
-                    "c_core64_stable_fixed_b0_sparse": V6Core64StableFixedController,
+                    "version1": Version1Core64StableFixedController,
+                    "c_core64_stable_fixed_b0_sparse": Version1Core64StableFixedController,
                     "c_direct_core96_weighted_g1_b0": V7DirectCore96WeightedG1B0Controller,
                     "c_core96_coverage_stable_fill": V8CoreStableCoverageFillController,
                 }.get(self._mode, V53OptimizedACDController)
@@ -194,6 +196,7 @@ class V53PolicyService(RobolabPolicyService):
                         in {
                             "c_cond_step0",
                             "c_cond_step0_b0_sparse",
+                            "version1",
                             "c_core64_stable_fixed_b0_sparse",
                             "c_direct_core96_weighted_g1_b0",
                             "c_core96_coverage_stable_fill",
@@ -289,7 +292,8 @@ class V53PolicyService(RobolabPolicyService):
                     "dense": "dense",
                     "c_cond_step0": STRATEGY_VERSION,
                     "c_cond_step0_b0_sparse": ALL_SPARSE_LATER_STRATEGY_VERSION,
-                    "c_core64_stable_fixed_b0_sparse": V6_CORE64_STABLE_FIXED_STRATEGY_VERSION,
+                    "version1": VERSION1_STRATEGY_VERSION,
+                    "c_core64_stable_fixed_b0_sparse": VERSION1_STRATEGY_VERSION,
                     "c_direct_core96_weighted_g1_b0": V7_DIRECT_CORE96_WEIGHTED_STRATEGY_VERSION,
                     "c_core96_coverage_stable_fill": V8_CORE_STABLE_COVERAGE_FILL_STRATEGY_VERSION,
                 }.get(self._mode, "v5.3"),
@@ -327,7 +331,8 @@ class V53PolicyService(RobolabPolicyService):
 
 def serve(args: V53ServerArgs) -> None:
     displayed_budgets = {
-        "c_core64_stable_fixed_b0_sparse": V6_TOKEN_BUDGETS,
+        "version1": VERSION1_TOKEN_BUDGETS,
+        "c_core64_stable_fixed_b0_sparse": VERSION1_TOKEN_BUDGETS,
         "c_direct_core96_weighted_g1_b0": V7_TOKEN_BUDGETS,
         "c_core96_coverage_stable_fill": V7_TOKEN_BUDGETS,
     }.get(

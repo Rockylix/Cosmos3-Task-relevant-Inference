@@ -76,7 +76,7 @@ pytest: 9 passed
 配对产物：
 
 ```text
-/root/robolab/experiments/preliminary/sparsity/action_attention_l1_residual/
+/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/action_attention_l1_residual/
   action_attention_current_block_mass90_l1_residual_shift5_BananaInBowlTask_c3_v1/
 ```
 
@@ -127,7 +127,7 @@ pytest: 9 passed
 闭环逐 chunk token 统计：
 
 ```text
-/root/robolab/experiments/preliminary/sparsity/action_attention_l1_residual/
+/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/action_attention_l1_residual/
   action_attention_current_block_mass90_l1_residual_shift5_BananaInBowlTask_sim_v1/server/
 ```
 

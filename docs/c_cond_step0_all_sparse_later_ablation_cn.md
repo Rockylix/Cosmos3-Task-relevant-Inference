@@ -71,7 +71,7 @@ python -m cosmos_framework.scripts.action_policy_server_robolab_v5_3_acd_packed_
   --host 127.0.0.1 --port 8000 --format-prompt-as-json True --no-guardrails \
   --seed 579362556 --deterministic-seed --guidance 3.0 \
   --num-steps 4 --shift 5.0 --ablation-mode c_cond_step0_b0_sparse \
-  --intervention-output-dir /root/robolab/experiments/preliminary/sparsity/velocity_cache/<run>/server
+  --intervention-output-dir /root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/<run>/server
 ```
 
 稳定 benchmark 模式名为 `c_cond_b0_sparse_opt`。

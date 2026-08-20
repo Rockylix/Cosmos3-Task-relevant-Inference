@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture one V6-B request for representative simple/moderate/complex tasks."""
+"""Capture one Version1 request for representative simple/moderate/complex tasks."""
 
 from __future__ import annotations
 

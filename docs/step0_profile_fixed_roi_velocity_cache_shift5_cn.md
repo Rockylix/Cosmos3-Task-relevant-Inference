@@ -208,14 +208,14 @@ step 0 velocity 是明显陈旧的时间相关向量场。它在最后一步与�
 输出：
 
 - RoboLab episode、HDF5 与五个 viewport 视频：`/root/robolab/RoboLab/output/velocity_cache_v1_shift5_5tasks_v1/`；
-- 64 个 request 的 ROI、token、velocity cache 与 timing artifact：`/root/robolab/experiments/preliminary/sparsity/velocity_cache/velocity_cache_v1_shift5_5tasks_v1/server/`；
+- 64 个 request 的 ROI、token、velocity cache 与 timing artifact：`/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/velocity_cache_v1_shift5_5tasks_v1/server/`；
 - 服务端总表：上述 server 目录中的 `aggregate.json`。
 
 ## 5. 输出目录
 
 正式 paired 结果：
 
-`/root/robolab/experiments/preliminary/sparsity/velocity_cache/step0_profile_fixed_roi_velocity_cache_shift5_BananaInBowlTask_c3_v3/`
+`/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/step0_profile_fixed_roi_velocity_cache_shift5_BananaInBowlTask_c3_v3/`
 
 关键文件：
 
@@ -238,7 +238,7 @@ Viewport 视频：
 
 服务器逐 chunk 结果：
 
-`/root/robolab/experiments/preliminary/sparsity/velocity_cache/step0_profile_fixed_roi_velocity_cache_shift5_BananaInBowlTask_sim_v1/server/`
+`/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/step0_profile_fixed_roi_velocity_cache_shift5_BananaInBowlTask_sim_v1/server/`
 
 其中 `v1`、`v2` paired 目录是开发期间暴露 token-grid/velocity-grid 布局差异的失败运行；正式结果为 `v3`。
 
@@ -253,7 +253,7 @@ HF_HUB_OFFLINE=1 \
 PYTHONPATH=. \
 /root/cosmos3/cosmos/packages/cosmos3/.venv/bin/python \
   tools/run_robolab_step0_fixed_roi_velocity_cache.py \
-  --output-root /root/robolab/experiments/preliminary/sparsity/velocity_cache/step0_profile_fixed_roi_velocity_cache_shift5_BananaInBowlTask_c3_v4
+  --output-root /root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/step0_profile_fixed_roi_velocity_cache_shift5_BananaInBowlTask_c3_v4
 ```
 
 ### 6.2 实验服务器
@@ -277,7 +277,7 @@ PYTHONPATH=. \
   --port 8000 \
   --fixed-roi-mass-threshold 0.9 \
   --first-sparse-block 4 \
-  --intervention-output-dir /root/robolab/experiments/preliminary/sparsity/velocity_cache/step0_profile_fixed_roi_velocity_cache_shift5_BananaInBowlTask_sim_v2/server
+  --intervention-output-dir /root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/step0_profile_fixed_roi_velocity_cache_shift5_BananaInBowlTask_sim_v2/server
 ```
 
 ### 6.3 RoboLab

@@ -20,10 +20,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-EDGE_ROOT = Path("/root/robolab/worktrees/core64-stable-fixed-k184-152-136")
+EDGE_ROOT = Path("/root/robolab/cosmos-framework-edge-version1")
 ROBOLAB_ROOT = Path("/root/robolab/RoboLab")
 EXPERIMENT_ROOT = Path(
-    "/root/robolab/experiments/preliminary/sparsity/evaluation/"
+    "/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/evaluation/"
     "direct_core64_baseline_v1_bibd_6seeds_6tasks_v1"
 )
 CHECKPOINT = ROBOLAB_ROOT / "Cosmos3-Edge-Policy-DROID"

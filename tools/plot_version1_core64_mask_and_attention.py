@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot V6-B execution masks and selected-core-block spatial attention."""
+"""Plot Version1 execution masks and selected-core-block spatial attention."""
 
 from __future__ import annotations
 
@@ -279,7 +279,7 @@ def main() -> None:
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--frames-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--title-prefix", default="V6-B")
+    parser.add_argument("--title-prefix", default="Version1")
     parser.add_argument("--branch", default="conditional")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)

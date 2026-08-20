@@ -13,7 +13,7 @@ from cosmos_framework.scripts.robolab_action_attention_aligned_frame_l1_residual
 )
 
 OUTPUT_ROOT = Path(
-    "/root/robolab/experiments/preliminary/sparsity/action_attention_l1_residual/"
+    "/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/action_attention_l1_residual/"
     "action_attention_aligned_frame_mass90_l1_residual_shift5_BananaInBowlTask_c3_v1"
 )
 

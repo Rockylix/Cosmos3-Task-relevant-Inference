@@ -23,7 +23,7 @@ def _conditional_step0_records() -> list[dict]:
     return records
 
 
-def test_v6_selects_direct_core64_before_stable() -> None:
+def test_version1_selects_direct_core64_before_stable() -> None:
     assert STABLE_REFERENCE_CORE_TOKEN_BUDGET == CORE_TOKEN_BUDGET == 64
 
     plan = build_v52_ablation_plan(

@@ -185,7 +185,7 @@ V5 闭环运行 `BananaInBowlTask`：
 Paired chunk：
 
 ```text
-/root/robolab/experiments/preliminary/sparsity/velocity_cache/
+/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/
 grouped_temporal_closed_roi_velocity_cache_shift5_BananaInBowlTask_c3_v1/
 ```
 
@@ -226,7 +226,7 @@ HF_HUB_OFFLINE=1 LD_LIBRARY_PATH='' PYTHONPATH=$PWD \
 /root/cosmos3/cosmos/packages/cosmos3/.venv/bin/python \
   tools/run_robolab_step0_fixed_roi_velocity_cache.py \
   --strategy-version v5 \
-  --output-root /root/robolab/experiments/preliminary/sparsity/velocity_cache/<new-run-id>
+  --output-root /root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/<new-run-id>
 ```
 
 V5 server：
@@ -243,7 +243,7 @@ HF_HUB_OFFLINE=1 LD_LIBRARY_PATH='' PYTHONPATH=$PWD \
   --deterministic-seed --seed 579362556 \
   --host 0.0.0.0 --port 8000 \
   --roi-mass-threshold 0.9 \
-  --intervention-output-dir /root/robolab/experiments/preliminary/sparsity/velocity_cache/<server-run-id>
+  --intervention-output-dir /root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/<server-run-id>
 ```
 
 RoboLab：

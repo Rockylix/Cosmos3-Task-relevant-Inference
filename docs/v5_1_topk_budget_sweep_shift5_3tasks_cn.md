@@ -90,7 +90,7 @@
 汇总目录：
 
 ```text
-/root/robolab/experiments/preliminary/sparsity/velocity_cache/
+/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/
   v5_1_topk_budget_sweep_shift5_3tasks_seed579362556_v1/
 ```
 

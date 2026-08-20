@@ -43,7 +43,7 @@ class GroupedTemporalClosedROIServerArgs(RobolabServerArgs):
     """Future spatial tokens retained per frame in B20--B27."""
 
     intervention_output_dir: Path = Path(
-        "/root/robolab/experiments/preliminary/sparsity/velocity_cache/"
+        "/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/"
         "grouped_score_smoothed_budgeted_roi_velocity_cache_shift5_v5_1/server"
     )
     """Request-level masks, velocity-cache traces, token counts, and timing."""

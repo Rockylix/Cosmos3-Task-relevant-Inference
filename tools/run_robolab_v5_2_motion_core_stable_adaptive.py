@@ -41,7 +41,7 @@ from tools.run_robolab_step0_fixed_roi_velocity_cache import (
 )
 
 OUTPUT_ROOT = Path(
-    "/root/robolab/experiments/preliminary/sparsity/velocity_cache/"
+    "/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/"
     "v5_2_motion_core_stable_adaptive_k80_BananaInBowlTask_c3_v1"
 )
 ARM_NAMES = {

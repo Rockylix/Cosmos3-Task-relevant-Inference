@@ -1,4 +1,4 @@
-# 当前稀疏策略简述：V6-B Direct Core64 → Stable
+# 当前稀疏策略简述：Version1 Direct Core64 → Stable
 
 ## 1. 一句话说明
 
@@ -6,7 +6,9 @@
 future tokens 进入 Transformer 的 Attention 和 MLP，未选背景在 hidden 输出端由 side
 buffer 补齐，并在 UniPC 积分前使用 Step 0 的背景 velocity cache。
 
-当前版本：`v6-b-direct-core64-then-stable-k184-152-136`，固定 `shift=5`、4 个 denoise steps。
+公开版本名为 **Version1**，历史 artifact 中的内部策略 ID 仍为
+`v6-b-direct-core64-then-stable-k184-152-136`，以保证旧结果可读取。固定 `shift=5`、
+4 个 denoise steps。
 
 ## 2. Mask 如何生成
 
@@ -81,24 +83,32 @@ Step 0 保存完整 guided vision velocity。Step 1-3 在进入 UniPC 更新前�
 
 ## 6. 当前状态与边界
 
-- 已完成 6 policy seeds、12-task 平衡任务池、每策略 36 episodes 的正式配对评估：V6-B
-  `14/36`，Dense `14/36`，Version1 `13/36`；V6-B 相对 Dense 有 5 个单元获益、5 个单元
+- 已完成 6 policy seeds、12-task 平衡任务池、每策略 36 episodes 的正式配对评估：Version1
+  `14/36`，Dense `14/36`，Legacy ROI velocity cache `13/36`；Version1 相对 Dense 有
+  5 个单元获益、5 个单元
   损失，因此不能解释为逐 episode 等价；
-- RTX 4090 同模型预热单 chunk benchmark 中，V6-B median `0.571400 s`、P90
+- RTX 4090 同模型预热单 chunk benchmark 中，Version1 median `0.571400 s`、P90
   `0.574525 s`，相对 Dense `0.857823 s` 为 `1.501x`；
 - seed `579362556` 的两个简单任务 `2/2` 只保留为早期冒烟记录，不作为正式成功率；
 - 旧的 `0.566990 s`、`1.508x` 和 `5/9` 属于 Core48→Stable→扩张 Core64 的 V6-A，
-  不能作为当前 V6-B 的结果；
+  不能作为当前 Version1 的结果；
 - Core 在每个 future frame 独立 Top-64，因此不同帧的 Core 空间位置不保证完全一致；
 - Stable 排除八帧 Core64 union，可能改变旧 V6-A 的 Stable 位置，必须重新验证 token
   组成、attention-mass retention、单 chunk 延迟和闭环成功率。
 
-V6-B 两任务报告：
-`/root/robolab/experiments/preliminary/sparsity/velocity_cache/direct_core64_stable_shift5_2tasks_seed579362556_v1/report_cn.md`
+Version1 两任务报告：
+`/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/direct_core64_stable_shift5_2tasks_seed579362556_v1/report_cn.md`
 
-V6-B 6-seed BIBD 正式评估：[direct_core64_bibd_6seeds_evaluation_cn.md](direct_core64_bibd_6seeds_evaluation_cn.md)
+Version1 6-seed BIBD 正式评估：[version1_evaluation_6seeds_cn.md](version1_evaluation_6seeds_cn.md)
 
-旧 V6-A 历史实验：[core64_stable_fixed_adaptive_reduced_cn.md](core64_stable_fixed_adaptive_reduced_cn.md)
+旧 V6-A 历史实验：[core64_stable_fixed_adaptive_reduced_cn.md](../core64_stable_fixed_adaptive_reduced_cn.md)
 
 四任务 mask overlay：
-`/root/robolab/experiments/preliminary/sparsity/visualization/core64_mask_overlay_4tasks_seed579362556_v1/README.md`
+`/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/visualization/core64_mask_overlay_4tasks_seed579362556_v1/README.md`
+
+## 7. Git 与数据规则
+
+- Version1 branch：`version/version1`；
+- 实现、测试、工具和本文件提交到 Git；
+- `/experiments/` 完整忽略，原始 tensor、CSV、图片、视频和日志均不提交；
+- 关键参数、汇总指标、运行命令和结论写入 `docs/experiments/` 后提交。
