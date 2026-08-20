@@ -1,0 +1,114 @@
+# 当前稀疏策略简述：Version1 Direct Core64 → Stable
+
+## 1. 一句话说明
+
+先用 Step 0 conditional 全量计算得到 Action→Future 的空间关注区域；后续只让选中的
+future tokens 进入 Transformer 的 Attention 和 MLP，未选背景在 hidden 输出端由 side
+buffer 补齐，并在 UniPC 积分前使用 Step 0 的背景 velocity cache。
+
+公开版本名为 **Version1**，历史 artifact 中的内部策略 ID 仍为
+`v6-b-direct-core64-then-stable-k184-152-136`，以保证旧结果可读取。固定 `shift=5`、
+4 个 denoise steps。
+
+## 2. Mask 如何生成
+
+Step 0 conditional branch 全量计算，并从 B4-B27 采集 Action Query 对 L1-L8 future
+tokens 的 raw attention probability。每个 future frame 独立生成 `17x20=340` token mask。
+
+Mask 按固定顺序生成：
+
+- **Core（64）**：跨高质量 block 聚合后，每个 future frame 一次性直接 Top-64；
+- **Stable（88/72/64）**：跨 future frames 较稳定的环境区域；
+- **Adaptive**：某一 future frame 相对共享环境更突出的正变化区域；
+- **Fill**：预算仍不足时，按 raw attention mass 补足。
+
+每个 chunk 只生成一次八张 Core64 mask，后续所有 step、block group 和 CFG branch 固定
+复用。Core64 固定后，Stable 才从八帧 Core64 空间并集之外选取；不存在 Core48 reference
+或 Core48→Core64 的二次扩张。Mask 从 G3 向 G1 构造，严格保证：
+
+`G3 subset G2 subset G1`。
+
+conditional/unconditional 共用同一组 mask；Core、Adaptive 和 Fill 可以随 future frame
+变化，Stable 在同一 group 内由 L1-L8 共用。
+
+## 3. Token 预算
+
+| Group | Transformer blocks | 每帧 future tokens | 典型组成 |
+|---|---|---:|---|
+| G1 | B0-B11 | 184/340 | Core64 + Stable88 + Adaptive/Fill32 |
+| G2 | B12-B19 | 152/340 | Core64 + Stable72 + Adaptive/Fill16 |
+| G3 | B20-B27 | 136/340 | Core64 + Stable64 + Adaptive/Fill8 |
+
+L0 condition latent、全部 action tokens、文本/条件 tokens 始终保留；只稀疏 L1-L8
+future vision tokens。RoPE、attention mask 和 token metadata 使用同一索引裁剪，位置 ID
+保持原编号。
+
+完整 GEN 序列为 3093 tokens。稀疏后：
+
+| Group | 实际 GEN tokens | 保留比例 |
+|---|---:|---:|
+| G1 | 1845 | 59.65% |
+| G2 | 1589 | 51.37% |
+| G3 | 1461 | 47.24% |
+
+## 4. 四步推理流程
+
+| Denoise step / CFG branch | 执行方式 |
+|---|---|
+| Step 0 conditional | B0-B27 全量；生成 mask，并缓存 conditional vision prediction |
+| Step 0 unconditional | B0-B11 用 G1，B12-B19 用 G2，B20-B27 用 G3 |
+| Step 1-3 conditional/unconditional | 两个 CFG branch 都按 G1/G2/G3 稀疏计算 |
+
+每个 sparse group 的真实流程：
+
+1. 保留全部非 future tokens，只 pack 选中的 L1-L8 空间 tokens；
+2. packed tokens 真正进入当前 blocks 的 Attention 和 MLP；
+3. group 切换时把已计算 token 写回 side buffer，再裁剪到下一组更小的 mask；
+4. B27 后恢复完整 hidden：已选位置写入新结果，未选位置沿用 side buffer；
+5. 恢复完整序列后，正常进入最终 RMSNorm、vision head 和 action head。
+
+因此它是实际缩短 Transformer 输入，不是仅在全量计算后乘 mask。但未选 hidden token
+也没有获得被跳过 block 的新 residual。
+
+## 5. Velocity cache
+
+Step 0 保存完整 guided vision velocity。Step 1-3 在进入 UniPC 更新前组合：
+
+- 最终 G3 ROI 内：使用当前 denoise step 的 velocity；
+- ROI 外背景：复用 Step 0 guided velocity；
+- L0 condition 与 action 输出：始终使用当前 step 的正常结果。
+
+此外，Step 0 unconditional 在 ROI 外令 `unconditional = conditional`，即背景 CFG delta
+为零，避免稀疏 unconditional 背景产生无依据的 CFG 放大。
+
+## 6. 当前状态与边界
+
+- 已完成 6 policy seeds、12-task 平衡任务池、每策略 36 episodes 的正式配对评估：Version1
+  `14/36`，Dense `14/36`，Legacy ROI velocity cache `13/36`；Version1 相对 Dense 有
+  5 个单元获益、5 个单元
+  损失，因此不能解释为逐 episode 等价；
+- RTX 4090 同模型预热单 chunk benchmark 中，Version1 median `0.571400 s`、P90
+  `0.574525 s`，相对 Dense `0.857823 s` 为 `1.501x`；
+- seed `579362556` 的两个简单任务 `2/2` 只保留为早期冒烟记录，不作为正式成功率；
+- 旧的 `0.566990 s`、`1.508x` 和 `5/9` 属于 Core48→Stable→扩张 Core64 的 V6-A，
+  不能作为当前 Version1 的结果；
+- Core 在每个 future frame 独立 Top-64，因此不同帧的 Core 空间位置不保证完全一致；
+- Stable 排除八帧 Core64 union，可能改变旧 V6-A 的 Stable 位置，必须重新验证 token
+  组成、attention-mass retention、单 chunk 延迟和闭环成功率。
+
+Version1 两任务报告：
+`/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/velocity_cache/direct_core64_stable_shift5_2tasks_seed579362556_v1/report_cn.md`
+
+Version1 6-seed BIBD 正式评估：[version1_evaluation_6seeds_cn.md](version1_evaluation_6seeds_cn.md)
+
+旧 V6-A 历史实验：[core64_stable_fixed_adaptive_reduced_cn.md](../core64_stable_fixed_adaptive_reduced_cn.md)
+
+四任务 mask overlay：
+`/root/robolab/cosmos-framework-edge-version1/experiments/preliminary/sparsity/visualization/core64_mask_overlay_4tasks_seed579362556_v1/README.md`
+
+## 7. Git 与数据规则
+
+- Version1 branch：`version/version1`；
+- 实现、测试、工具和本文件提交到 Git；
+- `/experiments/` 完整忽略，原始 tensor、CSV、图片、视频和日志均不提交；
+- 关键参数、汇总指标、运行命令和结论写入 `docs/experiments/` 后提交。
