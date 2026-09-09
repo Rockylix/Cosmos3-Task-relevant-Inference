@@ -41,10 +41,10 @@ def test_core_then_stable_plan_is_exact_and_disjoint() -> None:
 
 
 def test_version1_constants_define_only_the_current_candidate() -> None:
-    assert STRATEGY_VERSION == "version1-core64-stable120-k184-live-l0-no-velocity-cache"
+    assert STRATEGY_VERSION == "version1-core80-stable104-k184-live-l0-no-velocity-cache"
     assert TOKEN_BUDGET == 184
-    assert CORE_TOKEN_BUDGET == 64
-    assert STABLE_TOKEN_BUDGET == 120
+    assert CORE_TOKEN_BUDGET == 80
+    assert STABLE_TOKEN_BUDGET == 104
     assert ACTION_HORIZON_WEIGHTS == (1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0)
 
 
@@ -146,3 +146,13 @@ def test_lse_profile_matches_full_softmax(monkeypatch) -> None:
         token_layout=layout,
     )
     assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-5)
+
+
+def test_frozen_defaults_match_explicit_evaluated_budget() -> None:
+    records = _profile_records()
+    default = build_core_stable_plan(torch=torch, profile_records=records)
+    evaluated = build_core_stable_plan(
+        torch=torch, profile_records=records, core_token_budget=80, stable_token_budget=104
+    )
+    for key in ("core_masks", "stable_mask", "execution_mask", "core_scores", "stable_scores"):
+        assert torch.equal(default[key], evaluated[key])

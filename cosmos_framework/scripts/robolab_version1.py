@@ -4,8 +4,8 @@
 """Core-then-Stable sparse denoising for Cosmos3-Edge RoboLab inference.
 
 The conditional branch of denoising step 0 runs densely and profiles all 28
-decoder blocks.  Its action-to-future attention selects a per-frame Core-64
-and a cross-frame Stable-120 mask.  The resulting K184 mask is reused by every
+decoder blocks.  Its action-to-future attention selects a per-frame Core-80
+and a cross-frame Stable-104 mask.  The resulting K184 mask is reused by every
 decoder block in all remaining CFG passes and denoising steps.  L0 and action
 tokens always remain live Q/K/V tokens.
 
@@ -32,11 +32,11 @@ from cosmos_framework.data.generator.sequence_packing.runtime import (
 from cosmos_framework.model.attention import attention
 from cosmos_framework.scripts.robolab_action_query_attention_capture import _action_query_layout
 
-STRATEGY_VERSION = "version1-core64-stable120-k184-live-l0-no-velocity-cache"
+STRATEGY_VERSION = "version1-core80-stable104-k184-live-l0-no-velocity-cache"
 NUM_DENOISE_STEPS = 4
 PROFILE_BLOCKS = tuple(range(28))
 TOKEN_BUDGET = 184
-CORE_TOKEN_BUDGET = 64
+CORE_TOKEN_BUDGET = 80
 STABLE_TOKEN_BUDGET = TOKEN_BUDGET - CORE_TOKEN_BUDGET
 CORE_BLOCK_COUNT = 6
 STABLE_CV_PENALTY = 1.0
@@ -336,6 +336,8 @@ class Version1Controller:
         guidance: float,
         num_steps: int,
         output_dir: Path | None = None,
+        core_token_budget: int = CORE_TOKEN_BUDGET,
+        stable_token_budget: int = STABLE_TOKEN_BUDGET,
     ) -> None:
         if int(num_steps) != NUM_DENOISE_STEPS:
             raise ValueError(f"Version1 requires exactly {NUM_DENOISE_STEPS} denoising steps")
@@ -344,6 +346,15 @@ class Version1Controller:
         self.guidance = float(guidance)
         self.num_steps = int(num_steps)
         self.output_dir = Path(output_dir) if output_dir is not None else None
+        self.core_token_budget = int(core_token_budget)
+        self.stable_token_budget = int(stable_token_budget)
+        if self.core_token_budget <= 0 or self.stable_token_budget <= 0:
+            raise ValueError("Core and Stable budgets must be positive")
+        self.token_budget = self.core_token_budget + self.stable_token_budget
+        self.strategy_version = (
+            f"version1-core{self.core_token_budget}-stable{self.stable_token_budget}"
+            f"-k{self.token_budget}-live-l0-no-velocity-cache"
+        )
         self.model = net.language_model.model
         self.layers = list(self.model.layers)
         if len(self.layers) != len(PROFILE_BLOCKS):
@@ -469,14 +480,25 @@ class Version1Controller:
             ).detach()
         except Exception:
             self._profile_fallbacks += 1
-            profile = action_aligned_future_profiles(
-                torch=self.torch,
-                q_gen=kwargs["q_gen"],
-                k_ar=kwargs["k_ar"],
-                k_gen=kwargs["k_gen"],
-                scaling=float(kwargs["scaling"]),
-                token_layout=self._layout,
-            ).detach()
+            try:
+                profile = action_aligned_future_profiles(
+                    torch=self.torch,
+                    q_gen=kwargs["q_gen"],
+                    k_ar=kwargs["k_ar"],
+                    k_gen=kwargs["k_gen"],
+                    scaling=float(kwargs["scaling"]),
+                    token_layout=self._layout,
+                ).detach()
+            except Exception as exc:
+                stats = {}
+                for name in ("q_gen", "k_ar", "k_gen", "v_ar", "v_gen", "attn_output_gen"):
+                    value = kwargs[name].detach()
+                    finite = self.torch.isfinite(value)
+                    stats[name] = dict(shape=list(value.shape), dtype=str(value.dtype),
+                                       nonfinite=int((~finite).sum()),
+                                       bad_tokens=self.torch.nonzero(~finite.flatten(1).all(1)).flatten()[:16].tolist(),
+                                       max_abs=float(value[finite].abs().max()) if bool(finite.any()) else None)
+                raise RuntimeError(f"Action-Relevance failure block={block} tensor_stats={stats}") from exc
         self._profile_records.append({"block": block, "profiles": profile})
 
     def _run_dense_profile_layer(
@@ -594,7 +616,10 @@ class Version1Controller:
             raise RuntimeError("Version1 end_stack called without an active stack")
         dense_profile = int(self._current["step"]) == 0 and str(self._current["branch"]) == "conditional"
         if dense_profile:
-            self.plan = build_core_stable_plan(torch=self.torch, profile_records=self._profile_records)
+            self.plan = build_core_stable_plan(
+                torch=self.torch, profile_records=self._profile_records,
+                core_token_budget=self.core_token_budget, stable_token_budget=self.stable_token_budget,
+            )
             restored = hidden_states
             self._dense_stacks += 1
         else:
@@ -637,14 +662,14 @@ class Version1Controller:
 
         summary = {
             "schema_version": 1,
-            "strategy_version": STRATEGY_VERSION,
+            "strategy_version": self.strategy_version,
             "selection_order": "core_then_stable",
             "profile": "conditional_step0_B0_B27",
             "core_blocks": self.plan["core_blocks"],
             "core_block_count": CORE_BLOCK_COUNT,
-            "core_token_budget": CORE_TOKEN_BUDGET,
-            "stable_token_budget": STABLE_TOKEN_BUDGET,
-            "token_budget": TOKEN_BUDGET,
+            "core_token_budget": self.core_token_budget,
+            "stable_token_budget": self.stable_token_budget,
+            "token_budget": self.token_budget,
             "action_horizon_weights": list(ACTION_HORIZON_WEIGHTS),
             "stable_cv_penalty": STABLE_CV_PENALTY,
             "single_mask_stage": True,
@@ -663,7 +688,7 @@ class Version1Controller:
         if self.output_dir is not None:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             artifact = {
-                "strategy_version": STRATEGY_VERSION,
+                "strategy_version": self.strategy_version,
                 "core_blocks": self.plan["core_blocks"],
                 "block_quality": self.plan["block_quality"].detach().cpu(),
                 "core_masks": self.plan["core_masks"].detach().cpu(),
