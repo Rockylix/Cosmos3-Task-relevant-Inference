@@ -1,5 +1,5 @@
 {
-  "release": "edge-c80-s104-action-weighted-20260909",
+  "release": "edge-c80-s104-action-weighted-clean-20260909",
   "source_base_commit": "d732f43bc6b8b6a4b952c04ddb7370e3e9fb1204",
   "evaluated_controller_sha256": "ce2dcb1c401f6a120768f0849d11468a36ffae8e532f1b9950be75a8db99c7aa",
   "core": 80,
@@ -46,10 +46,11 @@
   "guidance": 3.0,
   "num_steps": 4,
   "shift": 5.0,
-  "persistent_l0_kv": false,
-  "live_l0_qkv": true,
-  "velocity_cache": false,
   "checkpoint": "Cosmos3-Edge-Policy-DROID",
   "checkpoint_metadata_sha256": "a279d57b84d458c2aeeaf9698aee8c1b3830204422da67ab31c801ab57225019",
-  "evaluation_note": "Existing 1200-rollout result used the evaluated controller above with explicit C80/S104. This release changes defaults to those explicit values; it is not a new benchmark run."
+  "evaluation_note": "Existing 1200-rollout result used the evaluated controller hash with explicit C80/S104. Cleanup regression results are documented separately; no new success-rate evaluation is claimed.",
+  "previous_freeze_commit": "7787fbe230e7dfb6949b670a3471c68aba76b3bf",
+  "sampler": "native Edge UniPC",
+  "conditioning": "L0 clean latent fixed; its Q/K/V are recomputed in every block of every CFG stack",
+  "selector_parameters": "fixed, no ablation overrides"
 }

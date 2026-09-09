@@ -1,158 +1,154 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
 import torch
 
-from cosmos_framework.scripts import robolab_version1 as version1_module
-from cosmos_framework.scripts.robolab_version1 import (
-    ACTION_HORIZON_WEIGHTS,
-    CORE_BLOCK_COUNT,
-    CORE_TOKEN_BUDGET,
-    STABLE_TOKEN_BUDGET,
-    STRATEGY_VERSION,
-    TOKEN_BUDGET,
-    action_aligned_future_profiles,
-    action_aligned_future_profiles_with_lse,
-    build_core_stable_plan,
-)
+from cosmos_framework.inference.edge_core_stable_layout import _action_query_layout
+from cosmos_framework.scripts import robolab_version1 as policy
 
 
-def _profile_records() -> list[dict]:
-    generator = torch.Generator().manual_seed(73)
-    return [
-        {
-            "block": block,
-            "profiles": torch.rand((8, 340), generator=generator) + 0.01,
-        }
-        for block in range(28)
-    ]
+def _records():
+    rng = torch.Generator().manual_seed(73)
+    return [{"block": b, "profiles": torch.rand((8, 340), generator=rng) + 0.01} for b in range(28)]
 
 
-def test_core_then_stable_plan_is_exact_and_disjoint() -> None:
-    plan = build_core_stable_plan(torch=torch, profile_records=_profile_records())
-
-    assert tuple(plan["execution_mask"].shape) == (8, 340)
-    assert plan["execution_mask"].sum(dim=-1).tolist() == [TOKEN_BUDGET] * 8
-    assert plan["core_masks"].sum(dim=-1).tolist() == [CORE_TOKEN_BUDGET] * 8
-    assert int(plan["stable_mask"].sum()) == STABLE_TOKEN_BUDGET
-    assert int(plan["core_pool_mask"].sum()) == 340 - STABLE_TOKEN_BUDGET
-    assert not bool((plan["core_masks"].any(dim=0) & plan["stable_mask"]).any())
-    assert len(plan["core_blocks"]) == CORE_BLOCK_COUNT
-    assert len(set(plan["core_blocks"])) == CORE_BLOCK_COUNT
-
-
-def test_version1_constants_define_only_the_current_candidate() -> None:
-    assert STRATEGY_VERSION == "version1-core80-stable104-k184-live-l0-no-velocity-cache"
-    assert TOKEN_BUDGET == 184
-    assert CORE_TOKEN_BUDGET == 80
-    assert STABLE_TOKEN_BUDGET == 104
-    assert ACTION_HORIZON_WEIGHTS == (1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0)
-
-
-def _profile_layout(spatial: int) -> dict:
-    num_gen = 9 * spatial + 33
-    return {
-        "num_gen_tokens": num_gen,
-        "action_queries": [
-            {
-                "query_role": "predicted",
-                "action_horizon": horizon,
-                "gen_position": 9 * spatial + 1 + horizon,
-            }
-            for horizon in range(32)
-        ],
-        "latent_positions": {
-            f"L{latent}": list(range(latent * spatial, (latent + 1) * spatial)) for latent in range(9)
-        },
-    }
-
-
-def test_action_relevance_uses_symmetric_center_weights() -> None:
-    layout = _profile_layout(spatial=2)
-    q = torch.zeros(layout["num_gen_tokens"], 2, 1)
-    for horizon, value in enumerate((0.0, 1.0, 4.0, 10.0)):
-        q[layout["action_queries"][horizon]["gen_position"], :, 0] = value
-    k_ar = torch.zeros(3, 1, 1)
-    k_gen = torch.zeros(layout["num_gen_tokens"], 1, 1)
-    k_gen[layout["latent_positions"]["L1"][0], :, 0] = 1.0
-    k_gen[layout["latent_positions"]["L1"][1], :, 0] = -1.0
-
-    weighted = action_aligned_future_profiles(
-        torch=torch,
-        q_gen=q,
-        k_ar=k_ar,
-        k_gen=k_gen,
-        scaling=1.0,
-        token_layout=layout,
+def _layout(spatial=340):
+    count = 9 * spatial + 33
+    packed = SimpleNamespace(
+        attn_modes=["causal", "full"],
+        split_lens=[7, count],
+        vision=SimpleNamespace(sequence_indexes=torch.arange(7, 7 + 9 * spatial), token_shapes=[(9, 1, spatial)]),
+        action=SimpleNamespace(
+            sequence_indexes=torch.arange(7 + 9 * spatial, 7 + count),
+            token_shapes=[(33,)],
+            condition_mask=[torch.tensor([True] + [False] * 32)],
+        ),
     )
-    middle = action_aligned_future_profiles(
-        torch=torch,
-        q_gen=q,
-        k_ar=k_ar,
-        k_gen=k_gen,
-        scaling=1.0,
-        token_layout=layout,
-        action_horizon_weights=(0, 0.5, 0.5, 0),
+    return _action_query_layout(torch, packed)
+
+
+def _reference_attention(*, query, key, value, scale, return_lse, **kwargs):
+    assert return_lse
+    repeat = query.shape[2] // key.shape[2]
+    key = key.repeat_interleave(repeat, dim=2)
+    value = value.repeat_interleave(repeat, dim=2)
+    logits = torch.einsum("bqhd,bkhd->bhqk", query, key) * scale
+    return torch.einsum("bhqk,bkhd->bqhd", logits.softmax(-1), value), logits.logsumexp(-1).permute(0, 2, 1).unsqueeze(
+        -1
     )
-    edges = action_aligned_future_profiles(
-        torch=torch,
-        q_gen=q,
-        k_ar=k_ar,
-        k_gen=k_gen,
-        scaling=1.0,
-        token_layout=layout,
-        action_horizon_weights=(0.5, 0, 0, 0.5),
+
+
+def _reference_profile(q, ka, kg, layout, weights):
+    actions = torch.tensor([r["gen_position"] for r in layout["action_queries"] if r["query_role"] == "predicted"])
+    keys = torch.cat([ka, kg]).repeat_interleave(q.shape[1] // kg.shape[1], dim=1)
+    probs = torch.einsum("qhd,khd->hqk", q[actions].float() * 0.25, keys.float()).softmax(-1).mean(0)
+    return torch.stack(
+        [
+            (
+                probs[4 * i : 4 * i + 4][:, len(ka) + torch.tensor(layout["latent_positions"][f"L{i + 1}"])]
+                * torch.tensor(weights)[:, None]
+            ).sum(0)
+            for i in range(8)
+        ]
     )
-    assert torch.allclose(weighted[0], (2.0 / 3.0) * middle[0] + (1.0 / 3.0) * edges[0])
 
 
-def test_lse_profile_matches_full_softmax(monkeypatch) -> None:
-    layout = _profile_layout(spatial=3)
-    generator = torch.Generator().manual_seed(7)
-    q = torch.randn(layout["num_gen_tokens"], 4, 8, generator=generator)
-    k_ar = torch.randn(5, 2, 8, generator=generator)
-    k_gen = torch.randn(layout["num_gen_tokens"], 2, 8, generator=generator)
-    v_ar = torch.randn(5, 2, 8, generator=generator)
-    v_gen = torch.randn(layout["num_gen_tokens"], 2, 8, generator=generator)
+def test_fixed_budget_and_disjoint_masks():
+    plan = policy.build_core_stable_plan(torch=torch, profile_records=_records())
+    assert plan["core_masks"].sum(1).tolist() == [80] * 8
+    assert plan["stable_mask"].sum().item() == 104
+    assert not (plan["core_masks"] & plan["stable_mask"]).any()
+    assert plan["execution_mask"].sum(1).tolist() == [184] * 8
+    assert policy.STRATEGY_VERSION == "edge-core80-stable104-action-weighted"
 
-    def reference_attention(*, query, key, value, scale, return_lse, **kwargs):
-        del kwargs
-        repeat = query.shape[2] // key.shape[2]
-        key = key.repeat_interleave(repeat, dim=2)
-        value = value.repeat_interleave(repeat, dim=2)
-        logits = torch.einsum("bqhd,bkhd->bhqk", query, key) * float(scale)
-        probabilities = logits.softmax(dim=-1)
-        output = torch.einsum("bhqk,bkhd->bqhd", probabilities, value)
-        assert return_lse
-        lse = logits.logsumexp(dim=-1).permute(0, 2, 1).unsqueeze(-1)
-        return output, lse
 
-    monkeypatch.setattr(version1_module, "attention", reference_attention)
-    expected = action_aligned_future_profiles(
+def test_action_weighted_lse_matches_independent_softmax(monkeypatch):
+    monkeypatch.setattr(policy, "attention", _reference_attention)
+    layout = _layout(3)
+    rng = torch.Generator().manual_seed(7)
+    q = torch.randn(layout["num_gen_tokens"], 4, 8, generator=rng)
+    ka = torch.randn(5, 2, 8, generator=rng)
+    kg = torch.randn(layout["num_gen_tokens"], 2, 8, generator=rng)
+    actual = policy.action_aligned_future_profiles_with_lse(
         torch=torch,
         q_gen=q,
-        k_ar=k_ar,
-        k_gen=k_gen,
+        k_ar=ka,
+        k_gen=kg,
+        v_ar=torch.zeros_like(ka),
+        v_gen=torch.zeros_like(kg),
         scaling=0.25,
         token_layout=layout,
     )
-    actual = action_aligned_future_profiles_with_lse(
-        torch=torch,
-        q_gen=q,
-        k_ar=k_ar,
-        k_gen=k_gen,
-        v_ar=v_ar,
-        v_gen=v_gen,
-        scaling=0.25,
-        token_layout=layout,
-    )
+    expected = _reference_profile(q, ka, kg, layout, [1 / 6, 1 / 3, 1 / 3, 1 / 6])
+    uniform = _reference_profile(q, ka, kg, layout, [0.25] * 4)
     assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-5)
+    assert not torch.allclose(actual, uniform)
 
 
-def test_frozen_defaults_match_explicit_evaluated_budget() -> None:
-    records = _profile_records()
-    default = build_core_stable_plan(torch=torch, profile_records=records)
-    evaluated = build_core_stable_plan(
-        torch=torch, profile_records=records, core_token_budget=80, stable_token_budget=104
-    )
-    for key in ("core_masks", "stable_mask", "execution_mask", "core_scores", "stable_scores"):
-        assert torch.equal(default[key], evaluated[key])
+def test_fixed_policy_rejects_ablation_arguments():
+    with pytest.raises(TypeError):
+        policy.build_core_stable_plan(torch=torch, profile_records=_records(), core_token_budget=64)
+    with pytest.raises(ValueError, match="CFG 3"):
+        policy.Version1Controller(torch=torch, net=None, guidance=1.0, num_steps=4)
+
+
+def test_layout_includes_condition_frame_and_all_actions():
+    layout = _layout()
+    plan = policy.build_core_stable_plan(torch=torch, profile_records=_records())
+    selected = policy._selected_original_positions(torch, layout, plan["execution_mask"], "cpu")
+    assert selected.numel() == 340 + 8 * 184 + 33
+    assert torch.isin(torch.tensor(layout["latent_positions"]["L0"]), selected).all()
+    assert torch.isin(torch.tensor(layout["action_positions"]), selected).all()
+    assert len([q for q in layout["action_queries"] if q["query_role"] == "predicted"]) == 32
+
+
+def test_lse_failure_propagates_without_alternative_backend(monkeypatch):
+    def fail(**kwargs):
+        raise RuntimeError("test attention kernel error")
+
+    monkeypatch.setattr(policy, "attention", fail)
+    layout = _layout(2)
+    q = torch.zeros(layout["num_gen_tokens"], 2, 1)
+    k = torch.zeros(layout["num_gen_tokens"], 1, 1)
+    with pytest.raises(RuntimeError, match="test attention kernel error"):
+        policy.action_aligned_future_profiles_with_lse(
+            torch=torch, q_gen=q, k_ar=k[:3], k_gen=k, v_ar=k[:3], v_gen=k, scaling=1.0, token_layout=layout
+        )
+
+
+def test_each_stack_updates_l0_and_restores_only_current_input():
+    class Layer:
+        def __call__(self, pack, *args, **kwargs):
+            return policy.from_und_gen_splits(policy.get_und_seq(pack), policy.get_gen_seq(pack) + 1, pack), {}, None
+
+    layers = [Layer() for _ in range(28)]
+    net = SimpleNamespace(language_model=SimpleNamespace(model=SimpleNamespace(layers=layers)))
+    controller = policy.Version1Controller(torch=torch, net=net, guidance=3.0, num_steps=4)
+    controller._layout = _layout()
+    controller.plan = policy.build_core_stable_plan(torch=torch, profile_records=_records())
+    selected = policy._selected_original_positions(torch, controller._layout, controller.plan["execution_mask"], "cpu")
+    for step in range(1, 4):
+        for branch in ["conditional", "unconditional"]:
+            value = 100 * step + (50 if branch == "unconditional" else 0)
+            full = torch.full((3093, 2), float(value))
+            pack = policy._make_sequence_pack(und_seq=torch.zeros(7, 2), gen_seq=full)
+            controller._current = {"step": step, "branch": branch}
+            controller.begin_stack(hidden_states=pack, position_embeddings=(pack, pack), natten_metadata_list=None)
+            result = pack
+            for block, layer in enumerate(layers):
+                result, _, _ = controller.run_layer(
+                    block=block,
+                    decoder_layer=layer,
+                    hidden_states=result,
+                    attention_mask=None,
+                    memory_value=None,
+                    gen_only=False,
+                )
+                assert torch.equal(policy.get_gen_seq(result)[:340], torch.full((340, 2), float(value + block + 1)))
+            result = controller.end_stack(result)
+            expected = full.clone()
+            expected[selected] += 28
+            assert torch.equal(policy.get_gen_seq(result), expected)
+            assert controller._side_buffer is None

@@ -1030,7 +1030,6 @@ def _impl_forward(
         version1_controller.begin_stack(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
-            memory_gen_only=memory_gen_only,
             natten_metadata_list=natten_metadata_list,
         )
 

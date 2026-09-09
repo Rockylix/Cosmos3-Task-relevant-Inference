@@ -9,9 +9,8 @@ and a cross-frame Stable-104 mask.  The resulting K184 mask is reused by every
 decoder block in all remaining CFG passes and denoising steps.  L0 and action
 tokens always remain live Q/K/V tokens.
 
-This module deliberately has one production strategy.  It does not contain
-legacy ablation modes, persistent L0 K/V, Adaptive/Fill selection, depth-wise
-mask narrowing, or a cross-step velocity cache.
+The policy uses the native sampler. Each stack restores unselected future
+positions from that stack's input before the sampler consumes the output.
 """
 
 from __future__ import annotations
@@ -29,10 +28,10 @@ from cosmos_framework.data.generator.sequence_packing.runtime import (
     get_und_seq,
     init_sequence_pack,
 )
+from cosmos_framework.inference.edge_core_stable_layout import _action_query_layout
 from cosmos_framework.model.attention import attention
-from cosmos_framework.scripts.robolab_action_query_attention_capture import _action_query_layout
 
-STRATEGY_VERSION = "version1-core80-stable104-k184-live-l0-no-velocity-cache"
+STRATEGY_VERSION = "edge-core80-stable104-action-weighted"
 NUM_DENOISE_STEPS = 4
 PROFILE_BLOCKS = tuple(range(28))
 TOKEN_BUDGET = 184
@@ -86,7 +85,6 @@ def _validate_profile_inputs(
     k_ar: Any,
     k_gen: Any,
     token_layout: Mapping[str, Any],
-    action_horizon_weights: Sequence[float],
 ) -> tuple[Any, Any]:
     if q_gen.ndim != 3 or k_ar.ndim != 3 or k_gen.ndim != 3:
         raise ValueError("Expected Q/K tensors shaped [tokens,heads,head_dim]")
@@ -106,57 +104,8 @@ def _validate_profile_inputs(
         dtype=torch.long,
         device=q_gen.device,
     )
-    weights = torch.tensor(action_horizon_weights, dtype=torch.float32, device=q_gen.device)
-    if tuple(weights.shape) != (4,) or not bool(torch.isfinite(weights).all()):
-        raise ValueError("Action horizon weights must contain four finite values")
-    if bool((weights < 0).any()) or float(weights.sum()) <= 0:
-        raise ValueError("Action horizon weights must be non-negative with a positive sum")
-    return action_index, weights / weights.sum()
-
-
-def action_aligned_future_profiles(
-    *,
-    torch: Any,
-    q_gen: Any,
-    k_ar: Any,
-    k_gen: Any,
-    scaling: float,
-    token_layout: Mapping[str, Any],
-    action_horizon_weights: Sequence[float] = ACTION_HORIZON_WEIGHTS,
-) -> Any:
-    """Return weighted Action-to-Future attention with shape [8, spatial]."""
-
-    action_index, weights = _validate_profile_inputs(
-        torch=torch,
-        q_gen=q_gen,
-        k_ar=k_ar,
-        k_gen=k_gen,
-        token_layout=token_layout,
-        action_horizon_weights=action_horizon_weights,
-    )
-    q_heads = int(q_gen.shape[1])
-    kv_heads = int(k_gen.shape[1])
-    q_action = q_gen.index_select(0, action_index).detach().float().permute(1, 0, 2).contiguous()
-    k_all = torch.cat((k_ar, k_gen), dim=0).detach().float()
-    k_all = k_all.repeat_interleave(q_heads // kv_heads, dim=1).permute(1, 0, 2).contiguous()
-    probabilities = torch.softmax(torch.matmul(q_action * float(scaling), k_all.transpose(1, 2)), dim=-1)
-    head_mean = probabilities.mean(dim=0)
-
-    num_ar = int(k_ar.shape[0])
-    profiles = []
-    for latent in range(1, 9):
-        horizons = list(range(4 * (latent - 1), 4 * latent))
-        positions = torch.tensor(
-            token_layout["latent_positions"][f"L{latent}"],
-            dtype=torch.long,
-            device=q_gen.device,
-        )
-        aligned = head_mean[horizons].index_select(-1, positions + num_ar)
-        profiles.append((aligned * weights[:, None]).sum(dim=0))
-    result = torch.stack(profiles)
-    if not bool(torch.isfinite(result).all()) or bool((result < 0).any()):
-        raise RuntimeError("Version1 Action-Relevance profile is invalid")
-    return result
+    weights = torch.tensor(ACTION_HORIZON_WEIGHTS, dtype=torch.float32, device=q_gen.device)
+    return action_index, weights
 
 
 def action_aligned_future_profiles_with_lse(
@@ -169,7 +118,6 @@ def action_aligned_future_profiles_with_lse(
     v_gen: Any,
     scaling: float,
     token_layout: Mapping[str, Any],
-    action_horizon_weights: Sequence[float] = ACTION_HORIZON_WEIGHTS,
 ) -> Any:
     """Compute the same profile using the attention kernel's online LSE."""
 
@@ -181,7 +129,6 @@ def action_aligned_future_profiles_with_lse(
         k_ar=k_ar,
         k_gen=k_gen,
         token_layout=token_layout,
-        action_horizon_weights=action_horizon_weights,
     )
     q_heads = int(q_gen.shape[1])
     kv_heads = int(k_gen.shape[1])
@@ -231,10 +178,6 @@ def build_core_stable_plan(
     *,
     torch: Any,
     profile_records: Sequence[Mapping[str, Any]],
-    core_block_count: int = CORE_BLOCK_COUNT,
-    core_token_budget: int = CORE_TOKEN_BUDGET,
-    stable_token_budget: int = STABLE_TOKEN_BUDGET,
-    stable_cv_penalty: float = STABLE_CV_PENALTY,
 ) -> dict[str, Any]:
     """Select Core first, then Stable, and return one fixed K184 mask."""
 
@@ -248,9 +191,9 @@ def build_core_stable_plan(
         raise RuntimeError("Version1 profile tensor contains NaN/Inf or negative values")
 
     blocks, frames, spatial = map(int, raw.shape)
-    if not 0 < core_block_count <= blocks:
+    if not 0 < CORE_BLOCK_COUNT <= blocks:
         raise ValueError("Core block count does not fit the profiled decoder")
-    if core_token_budget + stable_token_budget > spatial:
+    if CORE_TOKEN_BUDGET + STABLE_TOKEN_BUDGET > spatial:
         raise ValueError("Core and Stable budgets exceed the spatial token grid")
 
     eps = torch.finfo(raw.dtype).eps
@@ -262,7 +205,7 @@ def build_core_stable_plan(
     block_entropy = entropy.mean(dim=1)
     block_quality = block_mass * (1.0 - block_entropy).clamp_min(0)
 
-    core_block_indices = torch.topk(block_quality, core_block_count).indices
+    core_block_indices = torch.topk(block_quality, CORE_BLOCK_COUNT).indices
     core_quality = block_quality.index_select(0, core_block_indices)
     core_weights = core_quality / core_quality.sum().clamp_min(eps)
     core_scores = (raw.index_select(0, core_block_indices) * core_weights[:, None, None]).sum(dim=0)
@@ -275,20 +218,20 @@ def build_core_stable_plan(
     stable_mean = global_scores.mean(dim=0)
     stable_std = global_scores.std(dim=0, unbiased=False)
     stable_cv = stable_std / stable_mean.clamp_min(eps)
-    stable_scores = stable_mean / (1.0 + float(stable_cv_penalty) * stable_cv)
+    stable_scores = stable_mean / (1.0 + float(STABLE_CV_PENALTY) * stable_cv)
 
     # Reserve enough global coordinates for Stable before selecting frame-local
     # Core tokens.  Core remains the first selected component, and Stable is
     # subsequently ranked only outside the resulting cross-frame Core union.
-    core_pool_budget = spatial - stable_token_budget
+    core_pool_budget = spatial - STABLE_TOKEN_BUDGET
     core_pool_mask = _select_mask(torch, core_scores.amax(dim=0), core_pool_budget)
     core_masks = torch.stack(
-        [_select_mask(torch, core_scores[frame], core_token_budget, core_pool_mask) for frame in range(frames)]
+        [_select_mask(torch, core_scores[frame], CORE_TOKEN_BUDGET, core_pool_mask) for frame in range(frames)]
     )
     core_union = core_masks.any(dim=0)
-    stable_mask = _select_mask(torch, stable_scores, stable_token_budget, ~core_union)
+    stable_mask = _select_mask(torch, stable_scores, STABLE_TOKEN_BUDGET, ~core_union)
     execution_mask = core_masks | stable_mask.unsqueeze(0)
-    if execution_mask.sum(dim=-1).tolist() != [core_token_budget + stable_token_budget] * frames:
+    if execution_mask.sum(dim=-1).tolist() != [CORE_TOKEN_BUDGET + STABLE_TOKEN_BUDGET] * frames:
         raise RuntimeError("Version1 failed exact K184 validation")
     if bool((core_union & stable_mask).any()):
         raise RuntimeError("Version1 Stable mask overlaps the Core union")
@@ -326,7 +269,7 @@ def _selected_original_positions(torch: Any, token_layout: Mapping[str, Any], ma
 
 
 class Version1Controller:
-    """Request-local Live-L0 sparse execution controller."""
+    """Request-local controller for the fixed C80/S104 policy."""
 
     def __init__(
         self,
@@ -336,25 +279,12 @@ class Version1Controller:
         guidance: float,
         num_steps: int,
         output_dir: Path | None = None,
-        core_token_budget: int = CORE_TOKEN_BUDGET,
-        stable_token_budget: int = STABLE_TOKEN_BUDGET,
     ) -> None:
-        if int(num_steps) != NUM_DENOISE_STEPS:
-            raise ValueError(f"Version1 requires exactly {NUM_DENOISE_STEPS} denoising steps")
+        if int(num_steps) != NUM_DENOISE_STEPS or float(guidance) != 3.0:
+            raise ValueError("The fixed Edge policy requires CFG 3 and 4 denoising steps")
         self.torch = torch
         self.net = net
-        self.guidance = float(guidance)
-        self.num_steps = int(num_steps)
         self.output_dir = Path(output_dir) if output_dir is not None else None
-        self.core_token_budget = int(core_token_budget)
-        self.stable_token_budget = int(stable_token_budget)
-        if self.core_token_budget <= 0 or self.stable_token_budget <= 0:
-            raise ValueError("Core and Stable budgets must be positive")
-        self.token_budget = self.core_token_budget + self.stable_token_budget
-        self.strategy_version = (
-            f"version1-core{self.core_token_budget}-stable{self.stable_token_budget}"
-            f"-k{self.token_budget}-live-l0-no-velocity-cache"
-        )
         self.model = net.language_model.model
         self.layers = list(self.model.layers)
         if len(self.layers) != len(PROFILE_BLOCKS):
@@ -373,7 +303,6 @@ class Version1Controller:
         self._selected_positions_device: Any | None = None
         self._profile_callback_block: int | None = None
         self._profile_records: list[dict[str, Any]] = []
-        self._profile_fallbacks = 0
         self.plan: dict[str, Any] | None = None
         self._completed_stacks = 0
         self._dense_stacks = 0
@@ -404,8 +333,6 @@ class Version1Controller:
         self._current = None
 
     def _call_semantics(self, call_index: int) -> tuple[int, str]:
-        if self.guidance == 1.0:
-            return call_index, "conditional"
         return call_index // 2, "conditional" if call_index % 2 == 0 else "unconditional"
 
     def _network_pre_hook(self, module: Any, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> None:
@@ -436,10 +363,8 @@ class Version1Controller:
         *,
         hidden_states: SequencePack,
         position_embeddings: tuple[SequencePack, SequencePack],
-        memory_gen_only: bool,
         natten_metadata_list: list | None,
     ) -> None:
-        del memory_gen_only
         if self._current is None:
             return
         if self.stack_active:
@@ -455,50 +380,28 @@ class Version1Controller:
             raise RuntimeError("Version1 does not support context-parallel SequencePacks")
         self._original_pack = hidden_states
         self._position_embeddings = position_embeddings
-        self._active_original_positions = self.torch.arange(
-            num_gen,
-            dtype=self.torch.long,
-            device=get_gen_seq(hidden_states).device,
+        self._active_original_positions = None
+        self._side_buffer = (
+            None
+            if self._current == {"step": 0, "branch": "conditional"}
+            else get_gen_seq(hidden_states).detach().clone()
         )
-        self._side_buffer = get_gen_seq(hidden_states).detach().clone()
         self.stack_active = True
 
     def _capture_profile(self, **kwargs: Any) -> None:
         block = int(kwargs["layer_index"])
         if self._profile_callback_block != block or self._layout is None:
             raise RuntimeError("Version1 attention callback has stale block state")
-        try:
-            profile = action_aligned_future_profiles_with_lse(
-                torch=self.torch,
-                q_gen=kwargs["q_gen"],
-                k_ar=kwargs["k_ar"],
-                k_gen=kwargs["k_gen"],
-                v_ar=kwargs["v_ar"],
-                v_gen=kwargs["v_gen"],
-                scaling=float(kwargs["scaling"]),
-                token_layout=self._layout,
-            ).detach()
-        except Exception:
-            self._profile_fallbacks += 1
-            try:
-                profile = action_aligned_future_profiles(
-                    torch=self.torch,
-                    q_gen=kwargs["q_gen"],
-                    k_ar=kwargs["k_ar"],
-                    k_gen=kwargs["k_gen"],
-                    scaling=float(kwargs["scaling"]),
-                    token_layout=self._layout,
-                ).detach()
-            except Exception as exc:
-                stats = {}
-                for name in ("q_gen", "k_ar", "k_gen", "v_ar", "v_gen", "attn_output_gen"):
-                    value = kwargs[name].detach()
-                    finite = self.torch.isfinite(value)
-                    stats[name] = dict(shape=list(value.shape), dtype=str(value.dtype),
-                                       nonfinite=int((~finite).sum()),
-                                       bad_tokens=self.torch.nonzero(~finite.flatten(1).all(1)).flatten()[:16].tolist(),
-                                       max_abs=float(value[finite].abs().max()) if bool(finite.any()) else None)
-                raise RuntimeError(f"Action-Relevance failure block={block} tensor_stats={stats}") from exc
+        profile = action_aligned_future_profiles_with_lse(
+            torch=self.torch,
+            q_gen=kwargs["q_gen"],
+            k_ar=kwargs["k_ar"],
+            k_gen=kwargs["k_gen"],
+            v_ar=kwargs["v_ar"],
+            v_gen=kwargs["v_gen"],
+            scaling=float(kwargs["scaling"]),
+            token_layout=self._layout,
+        ).detach()
         self._profile_records.append({"block": block, "profiles": profile})
 
     def _run_dense_profile_layer(
@@ -575,7 +478,7 @@ class Version1Controller:
     ) -> tuple[SequencePack, dict[str, Any], Any]:
         if not self.stack_active or self._current is None:
             raise RuntimeError("Version1 run_layer called without an active stack")
-        if self._position_embeddings is None or self._active_original_positions is None:
+        if self._position_embeddings is None:
             raise RuntimeError("Version1 sparse stack state is incomplete")
         dense_profile = int(self._current["step"]) == 0 and str(self._current["branch"]) == "conditional"
         if dense_profile:
@@ -592,10 +495,7 @@ class Version1Controller:
 
         if block == 0:
             selected_original = self._prepare_selected_positions(get_gen_seq(hidden_states).device)
-            selected_local = self.torch.searchsorted(self._active_original_positions, selected_original)
-            if not self.torch.equal(self._active_original_positions.index_select(0, selected_local), selected_original):
-                raise RuntimeError("Version1 selected positions are not present in the full input sequence")
-            hidden_states, self._position_embeddings = self._slice_pack_and_rope(hidden_states, selected_local)
+            hidden_states, self._position_embeddings = self._slice_pack_and_rope(hidden_states, selected_original)
             self._active_original_positions = selected_original
 
         output, lbl_metadata, kv_to_store = decoder_layer(
@@ -617,8 +517,8 @@ class Version1Controller:
         dense_profile = int(self._current["step"]) == 0 and str(self._current["branch"]) == "conditional"
         if dense_profile:
             self.plan = build_core_stable_plan(
-                torch=self.torch, profile_records=self._profile_records,
-                core_token_budget=self.core_token_budget, stable_token_budget=self.stable_token_budget,
+                torch=self.torch,
+                profile_records=self._profile_records,
             )
             restored = hidden_states
             self._dense_stacks += 1
@@ -641,8 +541,7 @@ class Version1Controller:
         self._profile_callback_block = None
 
     def finish(self) -> dict[str, Any]:
-        branch_count = 1 if self.guidance == 1.0 else 2
-        expected_stacks = self.num_steps * branch_count
+        expected_stacks = NUM_DENOISE_STEPS * 2
         expected_dense = 1
         expected_sparse = expected_stacks - expected_dense
         if self.stack_active or self.plan is None:
@@ -661,34 +560,26 @@ class Version1Controller:
             raise RuntimeError("Version1 did not sparsify every expected decoder block")
 
         summary = {
-            "schema_version": 1,
-            "strategy_version": self.strategy_version,
+            "schema_version": 2,
+            "strategy_version": STRATEGY_VERSION,
             "selection_order": "core_then_stable",
             "profile": "conditional_step0_B0_B27",
             "core_blocks": self.plan["core_blocks"],
             "core_block_count": CORE_BLOCK_COUNT,
-            "core_token_budget": self.core_token_budget,
-            "stable_token_budget": self.stable_token_budget,
-            "token_budget": self.token_budget,
+            "core_token_budget": CORE_TOKEN_BUDGET,
+            "stable_token_budget": STABLE_TOKEN_BUDGET,
+            "token_budget": TOKEN_BUDGET,
             "action_horizon_weights": list(ACTION_HORIZON_WEIGHTS),
             "stable_cv_penalty": STABLE_CV_PENALTY,
-            "single_mask_stage": True,
-            "depth_narrowing": False,
-            "adaptive_enabled": False,
-            "budget_fill_enabled": False,
-            "persistent_condition_kv": False,
-            "l0_live_query_key_value": True,
-            "velocity_cache_enabled": False,
             "sampler": "baseline_unipc_unmodified",
             "unselected_future_hidden_restore": "current_stack_input",
             "dense_stack_count": self._dense_stacks,
             "sparse_stack_count": self._sparse_stacks,
-            "profile_fallback_count": self._profile_fallbacks,
         }
         if self.output_dir is not None:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             artifact = {
-                "strategy_version": self.strategy_version,
+                "strategy_version": STRATEGY_VERSION,
                 "core_blocks": self.plan["core_blocks"],
                 "block_quality": self.plan["block_quality"].detach().cpu(),
                 "core_masks": self.plan["core_masks"].detach().cpu(),

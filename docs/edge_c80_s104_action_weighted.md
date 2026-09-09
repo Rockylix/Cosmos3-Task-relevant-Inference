@@ -4,8 +4,8 @@ This version makes the evaluated K184 C80/S104 policy the default of
 `cosmos_framework.scripts.action_policy_server_robolab_version1`.
 The former `version/version1` commit `d732f43` defaults to C64/S120; the recent
 1200-rollout evaluation instead supplied C80/S104 explicitly through an external
-runner. This release incorporates the local budget-parameter support and failure
-diagnostics, and fixes the controller defaults and strategy name to C80/S104.
+runner. The first freeze captured that evaluated implementation. The cleanup release
+now exposes one fixed C80/S104 policy and one attention profiling backend.
 
 | Parameter | Fixed default |
 | --- | --- |
@@ -17,8 +17,8 @@ diagnostics, and fixes the controller defaults and strategy name to C80/S104.
 | Core and Stable overlap | none; Stable excludes the Core union |
 | Profiling | step 0 conditional branch, all 28 blocks |
 | Execution | one dense stack, seven sparse stacks; one mask stage |
-| L0 | live Q/K/V in every block and CFG pass; no persistent L0 K/V |
-| Background velocity cache | disabled; native Edge sampler |
+| L0 | native conditioning semantics: fixed clean latent, recomputed Transformer projections |
+| Sampler | native Edge UniPC |
 | Sampling | CFG 3, 4 steps, shift 5 |
 | Prompt | structured JSON |
 | Policy RNG | seed 0, advancing request seeds; reset server per task |
@@ -26,7 +26,8 @@ diagnostics, and fixes the controller defaults and strategy name to C80/S104.
 The four action weights apply to the four action horizons aligned with each
 future latent frame. Core layer weights and Stable layer aggregation are also
 quality-weighted. The default policy is therefore both action-weighted and
-Core-then-Stable. Explicit budget arguments remain available for ablations.
+Core-then-Stable. The production controller and selector accept no alternative
+Core/Stable budgets or action weights; CFG 3 and four steps are required.
 
 Use the canonical server from this checkout with the existing Cosmos environment:
 
@@ -37,9 +38,9 @@ python -m cosmos_framework.scripts.action_policy_server_robolab_version1 \
 ```
 
 Use the same local VAE overrides and cluster environment as the existing runner
-when the checkpoint's configured VAE location is unavailable. The server's usual
-per-request diagnostics are independent of the minimal-retention benchmark
-wrapper used for the 1200-rollout evaluation.
+when the checkpoint's configured VAE location is unavailable. Selection artifacts are disabled by default. Set `--version1-output-dir` only
+when selection tensors are explicitly needed for inspection. There is no
+per-request latency history or automatic aggregate-file rewrite.
 
 The [machine-readable record](edge_c80_s104_action_weighted.json) records the
 original evaluated controller hash, checkpoint metadata hash and policy settings.
@@ -53,6 +54,8 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest --noconftest -c /dev/null -q t
 ```
 
 The focused CPU tests cover exact/disjoint selection, action weighting,
-LSE/full-softmax profile equivalence, and equality between the new defaults and
-explicit C80/S104. Existing rollout results describe the explicit-budget
-implementation; changing the defaults does not constitute a new GPU evaluation.
+LSE/independent-softmax profile equivalence, invalid configuration rejection,
+LSE error propagation, and native L0 updates/current-stack restoration. The
+[cleanup audit](edge_policy_cleanup_audit.md) records the runtime checks.
+Existing rollout results describe the pre-cleanup explicit-budget implementation;
+regression probes do not constitute a new rollout evaluation.
