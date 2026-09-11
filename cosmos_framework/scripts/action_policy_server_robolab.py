@@ -28,7 +28,7 @@ init_script()
 import json
 import socket
 import threading
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -48,6 +48,7 @@ from cosmos_framework.data.generator.action.pose_utils import (
 from cosmos_framework.data.generator.action.transforms import ActionTransformPipeline
 from cosmos_framework.data.generator.joint_dataloader import IterativeJointDataLoader
 from cosmos_framework.inference.args import OmniSetupArgs, OmniSetupOverrides
+from cosmos_framework.inference.c3ache import C3acheCache, C3acheConfig
 from cosmos_framework.inference.common.args import ConfigFileType, ConfigOverrides, tyro_cli
 from cosmos_framework.inference.common.config import deserialize_config, deserialize_config_dict, load_config
 from cosmos_framework.inference.common.init import init_output_dir
@@ -381,6 +382,14 @@ class RobolabServerArgs(pydantic.BaseModel):
     """Guidance scale for denoising."""
     num_steps: int = 4
     """Number of denoising steps."""
+    c3ache: bool = False
+    """Enable cross-chunk full GEN-stack residual reuse (single GPU, four-step UniPC)."""
+    c3ache_refresh_period: int = pydantic.Field(default=2, ge=1)
+    """Full refresh every N chunks; 1 gives the dense validation control."""
+    c3ache_dense_tail_steps: int = pydantic.Field(default=2, ge=1, le=4)
+    """Final dense steps: default 2 gives C C D D on non-refresh chunks."""
+    c3ache_max_sessions: int = pydantic.Field(default=4, ge=1)
+    """Maximum retained session/episode caches; LRU eviction forces a fresh chunk."""
     shift: float = 5.0
     """UniPC sampler shift."""
 
@@ -407,9 +416,15 @@ class RobolabServerArgs(pydantic.BaseModel):
 
     @pydantic.model_validator(mode="after")
     def _validate_hidden_state_capture(self) -> "RobolabServerArgs":
+        """Validate capture modes and the supported C3ache serving schedule."""
         hidden_capture_enabled = self.hidden_state_capture_dir is not None
         residual_capture_enabled = self.block_residual_capture_dir is not None
         rope_capture_enabled = self.rope_qk_capture_dir is not None
+        if self.c3ache:
+            if self.sampler != "unipc" or self.num_steps != 4:
+                raise ValueError("The Edge C3ache prototype requires four-step UniPC")
+            if hidden_capture_enabled or residual_capture_enabled or rope_capture_enabled:
+                raise ValueError("Run C3ache separately from block/hidden-state/RoPE capture hooks")
         if hidden_capture_enabled != bool(self.hidden_state_capture_chunks):
             raise ValueError("--hidden-state-capture-dir and --hidden-state-capture-chunks must be set together")
         if any(index < 0 for index in self.hidden_state_capture_chunks):
@@ -464,6 +479,7 @@ class RobolabServerArgs(pydantic.BaseModel):
 
 class RobolabPolicyService:
     def __init__(self, args: RobolabServerArgs) -> None:
+        """Load baseline policy components and optionally attach a bounded C3ache manager."""
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is required for OmniMoTModel inference in this repo.")
         resolved_checkpoint_path = _resolve_checkpoint_path(args.checkpoint_path, hf_revision=args.hf_revision)
@@ -591,7 +607,26 @@ class RobolabPolicyService:
                 f"branches={self._rope_qk_capture_branches}"
             )
 
-        self._lock = threading.Lock()
+        self._c3ache_cache = (
+            C3acheCache(C3acheConfig(
+                refresh_period=args.c3ache_refresh_period,
+                dense_tail_steps=args.c3ache_dense_tail_steps,
+                num_steps=self.cfg.num_steps,
+                max_sessions=args.c3ache_max_sessions,
+            ))
+            if args.c3ache else None
+        )
+        self._active_c3ache_request = None
+        self._c3ache_sampler = args.sampler
+        if self._c3ache_cache is not None:
+            if torch.distributed.is_initialized() and torch.distributed.get_world_size() != 1:
+                raise ValueError("C3ache currently requires a single distributed rank/GPU")
+            transformer = self.model.net.language_model.model
+            if getattr(transformer, "enable_taylorseer", False):
+                raise ValueError("C3ache cannot be combined with TaylorSeer")
+        # Cover RNG selection, reset, model execution and response conversion
+        # with one lock; _infer_impl also takes it for the existing capture path.
+        self._lock = threading.RLock()
         self._rng = np.random.default_rng(self.cfg.seed)
         log.info(
             f"[robolab-policy-server] ready domain={self.cfg.domain_name!r} resolution={self.cfg.resolution!r} "
@@ -611,11 +646,12 @@ class RobolabPolicyService:
             "offload_guardrail_models": args.offload_guardrail_models,
         }
         if (
-            args.hidden_state_capture_dir is not None
+            args.c3ache
+            or args.hidden_state_capture_dir is not None
             or args.block_residual_capture_dir is not None
             or args.rope_qk_capture_dir is not None
         ):
-            # Experiment hooks must observe eager transformer/attention calls.
+            # Request-dependent skip decisions must remain outside compiled graphs.
             setup_overrides["use_torch_compile"] = False
             setup_overrides["use_cuda_graphs"] = False
         if args.experiment is not None:
@@ -765,6 +801,37 @@ class RobolabPolicyService:
         return sample
 
     def infer(self, obs: dict[str, Any]) -> dict[str, Any]:
+        """Serialize episode control and install cross-chunk caching when enabled.
+
+        Reset messages do not build observations or consume generation RNG.
+        A failed request drops its residuals, including failures after sampling.
+        """
+        with self._lock:
+            if obs.get("c3ache_control") == "reset":
+                C3acheCache.identity(obs)
+                if self._c3ache_cache is not None:
+                    self._c3ache_cache.reset(obs)
+                return {"reset": True}
+            if self._c3ache_cache is None:
+                return self._infer_impl(obs)
+            with self._c3ache_cache.request(
+                obs,
+                signature={"config": asdict(self.cfg), "sampler": self._c3ache_sampler, "prompt": obs.get("prompt")},
+                transformer=self.model.net.language_model.model,
+                net=self.model.net,
+                branches=("conditional", "unconditional") if self.cfg.guidance != 1.0 else ("conditional",),
+            ) as request:
+                self._active_c3ache_request = request
+                try:
+                    outputs = self._infer_impl(obs)
+                finally:
+                    self._active_c3ache_request = None
+            outputs["c3ache"] = dict(request.stats, chunk_id=request.chunk, reason=request.reason)
+            log.info(f"[c3ache] {outputs['c3ache']}")
+            return outputs
+
+    def _infer_impl(self, obs: dict[str, Any]) -> dict[str, Any]:
+        """Run the baseline preprocessing, RNG, generation and output conversions."""
         sample = self._build_sample(obs)
         data_batch = _build_data_batch_from_sample(sample)
         seed = self._next_seed()
@@ -826,6 +893,7 @@ class RobolabPolicyService:
                             seed=[seed],
                             num_steps=self.cfg.num_steps,
                             shift=self.cfg.shift,
+                            c3ache_request=self._active_c3ache_request,
                         )
                     else:
                         with collector:

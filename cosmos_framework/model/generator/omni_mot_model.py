@@ -6,7 +6,7 @@ from __future__ import annotations
 import collections
 import json
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 import numpy as np
@@ -2462,6 +2462,7 @@ class OmniMoTModel(ImaginaireModel):
         upsample_repetition_penalty: float = 1.0,
         upsample_presence_penalty: float = 0.0,
         upsample_seed: int | None = None,
+        c3ache_request: Any | None = None,
         **kwargs,
     ) -> dict[str, list[torch.Tensor]]:
         """
@@ -2496,6 +2497,9 @@ class OmniMoTModel(ImaginaireModel):
             sigma_max (float): Maximum sigma for the EDM sampler.
             skip_text_tokens_for_cfg (bool): If True, skip text tokens in unconditional branch.
             normalize_cfg (bool): If True, normalize the CFG output.
+            c3ache_request: Optional server-owned cross-chunk cache context. Each
+                actual sampler invocation receives an explicit step/CFG branch
+                tag; embeddings, output decoding and sampling remain unchanged.
             upsample_task (str | None): Canonical V4.2 task resolved by the
                 inference caller. ``None`` disables native prompt upsampling.
                 Otherwise, the conditional captions in
@@ -2711,7 +2715,12 @@ class OmniMoTModel(ImaginaireModel):
                 if guidance != 1.0 or velocity_postprocess_builder is not None:
                     uncond_text_kv_cache = self._make_inference_text_kv_cache(target_net)
 
+            c3ache_step = -1
+
             def velocity_fn(noise_x: list[torch.Tensor], timestep: torch.Tensor) -> list[torch.Tensor]:
+                """Evaluate one sampler step, explicitly tagging its two CFG branches."""
+                nonlocal c3ache_step
+                c3ache_step += 1
                 # len(noise_x) == B, noise_x[i] is shape (D)
                 # timestep is shape (B, 1)
                 torch.compiler.cudagraph_mark_step_begin()
@@ -2723,6 +2732,7 @@ class OmniMoTModel(ImaginaireModel):
                 timestep = timestep.repeat(len(noise_x), 1)  # [B,1]
 
                 def _single_velocity_fn(tokens: list[list[int]], skip_text_tokens: bool) -> list[torch.Tensor]:
+                    """Compute one branch with fresh embeddings, heads and conditioning."""
                     nonlocal uncond_text_kv_cache
                     packed_sequence_template = None
                     text_kv_cache: list[UndKVCache] | None = None
@@ -2738,18 +2748,26 @@ class OmniMoTModel(ImaginaireModel):
                     memory: MemoryState | None = (
                         InferenceTextKVMemoryState(text_kv_cache) if text_kv_cache is not None else None
                     )
-                    return self._get_velocity(
-                        net=net,
-                        noise_x=noise_x,
-                        timestep=timestep,
-                        text_tokens=tokens,
-                        sequence_plans=sequence_plans,
-                        gen_data_clean=gen_data_clean,
-                        skip_text_tokens=skip_text_tokens,
-                        packed_sequence_template=packed_sequence_template,
-                        memory=memory,
-                        has_noisy_actions=has_noisy_actions,
+                    branch_context = (
+                        c3ache_request.forward_context(
+                            c3ache_step, "conditional" if tokens is cond_tokens else "unconditional", timestep
+                        )
+                        if c3ache_request is not None
+                        else nullcontext()
                     )
+                    with branch_context:
+                        return self._get_velocity(
+                            net=net,
+                            noise_x=noise_x,
+                            timestep=timestep,
+                            text_tokens=tokens,
+                            sequence_plans=sequence_plans,
+                            gen_data_clean=gen_data_clean,
+                            skip_text_tokens=skip_text_tokens,
+                            packed_sequence_template=packed_sequence_template,
+                            memory=memory,
+                            has_noisy_actions=has_noisy_actions,
+                        )
 
                 needs_text_cfg = guidance != 1.0
                 if needs_text_cfg and guidance_interval is not None:

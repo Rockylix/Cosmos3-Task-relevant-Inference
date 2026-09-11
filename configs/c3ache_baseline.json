@@ -1,0 +1,39 @@
+{
+  "mode": "c3ache_cross_chunk_full_gen_residual",
+  "config": {
+    "refresh_period": 2,
+    "dense_tail_steps": 2,
+    "num_steps": 4,
+    "max_sessions": 10
+  },
+  "refresh_chunk_schedule": ["D", "D", "D", "D"],
+  "reuse_chunk_schedule": ["C", "C", "D", "D"],
+  "residual_boundary": "before_final_norm",
+  "cache_scope": "entire_GEN_sequence",
+  "cache_key": ["session_id", "episode_id", "cfg_branch", "denoising_step"],
+  "protocol": {
+    "sampler": "unipc",
+    "num_steps": 4,
+    "guidance": 3.0,
+    "shift": 5.0,
+    "policy_seed": 0,
+    "simulator_seed": 0,
+    "deterministic_seed": false,
+    "reset_policy_rng_each_task": true,
+    "format_prompt_as_json": true,
+    "compile": false,
+    "cuda_graphs": false,
+    "num_envs": 10,
+    "num_runs": 1,
+    "instruction_type": "default",
+    "video_mode": "none"
+  },
+  "validation": {
+    "cpu_tests_passed": 18,
+    "real_weight_gpu_inference": "H800; cross-chunk cache hits verified",
+    "full_1200_episode_evaluation": "in_progress",
+    "full_model_dense_equivalence": "not_yet_verified",
+    "paired_performance": "not_yet_verified"
+  },
+  "usage": "Configuration record only; pass matching flags to action_policy_server_robolab. The server does not automatically load this JSON."
+}

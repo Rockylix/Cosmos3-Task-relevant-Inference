@@ -1071,6 +1071,12 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             parallel_dims=sequence_shard_parallel_dims,
         )
 
+        c3ache = getattr(self, "_c3ache_request", None)
+        if c3ache is not None:
+            if self.predict_text_tokens or packed_seq.sound is not None:
+                raise RuntimeError("C3ache currently supports only action/video policy outputs")
+            c3ache.set_layout(packed_seq, use_video_temporal_causal)
+
         packed_outputs, lbl_metadata = self.language_model(
             input_pack,
             attention_mask=attention_meta,

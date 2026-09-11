@@ -981,10 +981,13 @@ def _impl_forward(
     natten_metadata_list: list | None = None,
     memory: MemoryState | None = None,
 ) -> tuple[SequencePack, dict[str, LBLMetadata]]:
-    """Shared training forward pass for the three MoT text models.
+    """Shared forward pass for the three MoT text models.
 
     Used by ``Qwen3VLTextModel``, ``Qwen3VLMoeTextModel``, and
     ``Nemotron3DenseVLTextModel``.
+
+    Inference may install a request-scoped C3ache context; hits skip this
+    entire layer loop for GEN while retaining both final normalization calls.
 
     Args:
         pack: Packed sequence with und/gen tokens.
@@ -1027,7 +1030,20 @@ def _impl_forward(
     # Derive gen_only once (outside compile) if using MemoryState
     memory_gen_only = memory.is_gen_only() if memory is not None else False
 
-    for i, decoder_layer in enumerate(self.layers):
+    # Installed only by the opt-in server: cache GEN before final norm.
+    c3ache = getattr(self, "_c3ache_request", None)
+    cached_gen, cache_ticket = None, None
+    if c3ache is not None:
+        if self.training or torch.is_grad_enabled():
+            raise RuntimeError("C3ache is inference-only")
+        cached_gen, cache_ticket = c3ache.before_transformer(get_gen_seq(hidden_states), position_ids)
+    if cached_gen is not None:
+        # UND outputs are unused by this action/video-only path. Request-local
+        # text KV stays cold until the next dense step initializes it normally.
+        hidden_states = dict(hidden_states)
+        set_gen_seq(hidden_states, cached_gen)
+
+    for i, decoder_layer in enumerate(self.layers if cached_gen is None else ()):
         # MemoryState: produce read-only MemoryValue for this layer (outside compile)
         memory_value = memory.read_for_layer(i) if memory is not None else None
 
@@ -1046,6 +1062,9 @@ def _impl_forward(
 
         for pathway, lbl_metadata in lbl_metadata_dict.items():
             lbl_metadata_all[pathway].append(lbl_metadata)
+
+    if c3ache is not None and cached_gen is None:
+        c3ache.after_transformer(cache_ticket, get_gen_seq(hidden_states))
 
     # Compute the load balancing loss across all layers. For dense models, final_lbl_metadata
     # will be an empty dictionary. For MoE models, it will be a dictionary with the stacked
