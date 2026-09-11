@@ -152,3 +152,47 @@ def test_each_stack_updates_l0_and_restores_only_current_input():
             expected[selected] += 28
             assert torch.equal(policy.get_gen_seq(result), expected)
             assert controller._side_buffer is None
+
+
+def test_opt_in_dense_step0_unconditional_does_not_profile_again():
+    calls = []
+
+    class Layer:
+        def __call__(self, pack, *args, **kwargs):
+            calls.append(len(policy.get_gen_seq(pack)))
+            return policy.from_und_gen_splits(policy.get_und_seq(pack), policy.get_gen_seq(pack) + 1, pack), {}, None
+
+    layers = [Layer() for _ in range(28)]
+    net = SimpleNamespace(language_model=SimpleNamespace(model=SimpleNamespace(layers=layers)))
+    controller = policy.Version1Controller(torch=torch, net=net, guidance=3.0, num_steps=4, dense_step0=True)
+    controller._layout = _layout()
+    controller._profile_records = _records()
+    controller.plan = policy.build_core_stable_plan(torch=torch, profile_records=controller._profile_records)
+    original_plan = controller.plan
+    # Conditional step0/profile already completed; now exercise the 7 remaining stacks.
+    controller._completed_stacks = controller._dense_stacks = 1
+    for step, branch in [(0, "unconditional")] + [
+        (s, b) for s in range(1, 4) for b in ("conditional", "unconditional")
+    ]:
+        controller._current = {"step": step, "branch": branch}
+        pack = policy._make_sequence_pack(und_seq=torch.zeros(7, 2), gen_seq=torch.zeros(3093, 2))
+        controller.begin_stack(hidden_states=pack, position_embeddings=(pack, pack), natten_metadata_list=None)
+        if step == 0:
+            assert controller._side_buffer is None
+        result = pack
+        for block, layer in enumerate(layers):
+            result, _, _ = controller.run_layer(
+                block=block,
+                decoder_layer=layer,
+                hidden_states=result,
+                attention_mask=None,
+                memory_value=None,
+                gen_only=False,
+            )
+        result = controller.end_stack(result)
+        if step == 0:
+            assert torch.equal(policy.get_gen_seq(result), torch.full((3093, 2), 28.0))
+    assert controller.plan is original_plan and len(controller._profile_records) == 28
+    assert calls == [3093] * 28 + [1845] * (6 * 28)
+    summary = controller.finish()
+    assert (summary["dense_stack_count"], summary["sparse_stack_count"]) == (2, 6)

@@ -178,8 +178,10 @@ def build_core_stable_plan(
     *,
     torch: Any,
     profile_records: Sequence[Mapping[str, Any]],
+    core_block_count: int = CORE_BLOCK_COUNT,
+    fixed_core_blocks: Sequence[int] | None = None,
 ) -> dict[str, Any]:
-    """Select Core first, then Stable, and return one fixed K184 mask."""
+    """Select Core then Stable; optional fixed Core layer IDs never restrict Stable's 28-layer input."""
 
     lookup = {int(record["block"]): record["profiles"] for record in profile_records}
     if sorted(lookup) != list(PROFILE_BLOCKS) or len(lookup) != len(profile_records):
@@ -191,7 +193,7 @@ def build_core_stable_plan(
         raise RuntimeError("Version1 profile tensor contains NaN/Inf or negative values")
 
     blocks, frames, spatial = map(int, raw.shape)
-    if not 0 < CORE_BLOCK_COUNT <= blocks:
+    if not 0 < core_block_count <= blocks:
         raise ValueError("Core block count does not fit the profiled decoder")
     if CORE_TOKEN_BUDGET + STABLE_TOKEN_BUDGET > spatial:
         raise ValueError("Core and Stable budgets exceed the spatial token grid")
@@ -205,7 +207,19 @@ def build_core_stable_plan(
     block_entropy = entropy.mean(dim=1)
     block_quality = block_mass * (1.0 - block_entropy).clamp_min(0)
 
-    core_block_indices = torch.topk(block_quality, CORE_BLOCK_COUNT).indices
+    if fixed_core_blocks is None:
+        core_block_indices = torch.topk(block_quality, core_block_count).indices
+        core_blocks = [int(PROFILE_BLOCKS[int(index)]) for index in core_block_indices]
+    else:
+        core_blocks = list(fixed_core_blocks)
+        if (
+            len(core_blocks) != core_block_count
+            or len(set(core_blocks)) != core_block_count
+            or any(type(block) is not int or block not in PROFILE_BLOCKS for block in core_blocks)
+        ):
+            raise ValueError("Fixed Core blocks must be unique valid IDs matching core_block_count")
+        # No Q ranking / layer selection here. Weights still reflect the current chunk.
+        core_block_indices = torch.tensor(core_blocks, dtype=torch.long, device=raw.device)
     core_quality = block_quality.index_select(0, core_block_indices)
     core_weights = core_quality / core_quality.sum().clamp_min(eps)
     core_scores = (raw.index_select(0, core_block_indices) * core_weights[:, None, None]).sum(dim=0)
@@ -241,7 +255,7 @@ def build_core_stable_plan(
         "block_mass": block_mass,
         "block_entropy": block_entropy,
         "block_quality": block_quality,
-        "core_blocks": [int(PROFILE_BLOCKS[int(index)]) for index in core_block_indices],
+        "core_blocks": core_blocks,
         "core_weights": core_weights,
         "core_scores": core_scores,
         "core_pool_mask": core_pool_mask,
@@ -279,12 +293,19 @@ class Version1Controller:
         guidance: float,
         num_steps: int,
         output_dir: Path | None = None,
+        dense_step0: bool = False,
+        core_block_count: int = CORE_BLOCK_COUNT,
+        fixed_core_blocks: Sequence[int] | None = None,
     ) -> None:
         if int(num_steps) != NUM_DENOISE_STEPS or float(guidance) != 3.0:
             raise ValueError("The fixed Edge policy requires CFG 3 and 4 denoising steps")
         self.torch = torch
         self.net = net
         self.output_dir = Path(output_dir) if output_dir is not None else None
+        # Experiment-only opt-in; the released 1-dense/7-sparse policy is unchanged.
+        self.dense_step0 = bool(dense_step0)
+        self.core_block_count = core_block_count
+        self.fixed_core_blocks = None if fixed_core_blocks is None else tuple(fixed_core_blocks)
         self.model = net.language_model.model
         self.layers = list(self.model.layers)
         if len(self.layers) != len(PROFILE_BLOCKS):
@@ -384,6 +405,7 @@ class Version1Controller:
         self._side_buffer = (
             None
             if self._current == {"step": 0, "branch": "conditional"}
+            or (self.dense_step0 and int(self._current["step"]) == 0)
             else get_gen_seq(hidden_states).detach().clone()
         )
         self.stack_active = True
@@ -490,6 +512,16 @@ class Version1Controller:
                 memory_value=memory_value,
                 gen_only=gen_only,
             )
+        if self.dense_step0 and int(self._current["step"]) == 0:
+            # Unconditional full forward: no second attention profile / mask selection.
+            return decoder_layer(
+                hidden_states,
+                attention_mask,
+                self._position_embeddings,
+                natten_metadata=None,
+                memory_value=memory_value,
+                gen_only=gen_only,
+            )
         if self.plan is None:
             raise RuntimeError("Sparse CFG pass started before Version1 selected its mask")
 
@@ -519,7 +551,14 @@ class Version1Controller:
             self.plan = build_core_stable_plan(
                 torch=self.torch,
                 profile_records=self._profile_records,
+                core_block_count=self.core_block_count,
+                fixed_core_blocks=self.fixed_core_blocks,
             )
+            restored = hidden_states
+            self._dense_stacks += 1
+        elif self.dense_step0 and int(self._current["step"]) == 0:
+            if self.plan is None:
+                raise RuntimeError("Step0 unconditional ran before conditional mask selection")
             restored = hidden_states
             self._dense_stacks += 1
         else:
@@ -542,7 +581,7 @@ class Version1Controller:
 
     def finish(self) -> dict[str, Any]:
         expected_stacks = NUM_DENOISE_STEPS * 2
-        expected_dense = 1
+        expected_dense = 2 if self.dense_step0 else 1
         expected_sparse = expected_stacks - expected_dense
         if self.stack_active or self.plan is None:
             raise RuntimeError("Version1 request did not finish cleanly")
@@ -565,7 +604,7 @@ class Version1Controller:
             "selection_order": "core_then_stable",
             "profile": "conditional_step0_B0_B27",
             "core_blocks": self.plan["core_blocks"],
-            "core_block_count": CORE_BLOCK_COUNT,
+            "core_block_count": self.core_block_count,
             "core_token_budget": CORE_TOKEN_BUDGET,
             "stable_token_budget": STABLE_TOKEN_BUDGET,
             "token_budget": TOKEN_BUDGET,
@@ -575,6 +614,9 @@ class Version1Controller:
             "unselected_future_hidden_restore": "current_stack_input",
             "dense_stack_count": self._dense_stacks,
             "sparse_stack_count": self._sparse_stacks,
+            "core_layers_reused": self.fixed_core_blocks is not None,
+            "profiled_block_count": len(self._profile_records),
+            "stable_profile_blocks": list(PROFILE_BLOCKS),
         }
         if self.output_dir is not None:
             self.output_dir.mkdir(parents=True, exist_ok=True)
