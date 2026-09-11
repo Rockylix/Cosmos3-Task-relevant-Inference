@@ -2085,6 +2085,8 @@ class OmniMoTModel(ImaginaireModel):
         packed_sequence_template: PackedSequence | None = None,
         memory: MemoryState | None = None,
         has_noisy_actions: bool,
+        worldcache_request: Any | None = None,
+        worldcache_branch: str | None = None,
     ) -> list[torch.Tensor]:
         """
         Compute velocity prediction for a single sampling step.
@@ -2230,11 +2232,23 @@ class OmniMoTModel(ImaginaireModel):
             )
 
         # --- Network forward ---
-        out = self.denoise(
-            net=net,
-            data_batch_packed=packed_sequence,
-            memory=memory,
-        )
+        if worldcache_request is None:
+            out = self.denoise(
+                net=net,
+                data_batch_packed=packed_sequence,
+                memory=memory,
+            )
+        else:
+            target_net = net if net is not None else self.net
+            raw_dims = gen_data_clean.raw_action_dim
+            out = worldcache_request.evaluate(
+                branch=worldcache_branch,
+                compute=lambda: self.denoise(net=net, data_batch_packed=packed_sequence, memory=memory),
+                packed=packed_sequence,
+                patch_size=int(target_net.latent_patch_size),
+                action_dim=raw_dims[0] if raw_dims is not None else None,
+                vision_projection=target_net.llm2vae,
+            )
 
         # --- Apply velocity masks ---
         # Zero out velocity for conditioned parts (they don't change during sampling)
@@ -2462,6 +2476,7 @@ class OmniMoTModel(ImaginaireModel):
         upsample_repetition_penalty: float = 1.0,
         upsample_presence_penalty: float = 0.0,
         upsample_seed: int | None = None,
+        worldcache_config: Any | None = None,
         **kwargs,
     ) -> dict[str, list[torch.Tensor]]:
         """
@@ -2553,6 +2568,29 @@ class OmniMoTModel(ImaginaireModel):
             ValueError: If the seed is a single integer. This is not supported anymore: `seed` must be
                 a list of integers, one for each sample.
         """
+        # Opt-in, request-local inference adapter. Dense has no cache imports or
+        # tensor work. Never reuse histories across chunks, tasks, or CFG branches.
+        worldcache_request = None
+        if hasattr(self, "_last_worldcache_report"):
+            self._last_worldcache_report = None
+        if worldcache_config is not None:
+            from cosmos_framework.inference.worldcache import WorldCacheConfig, WorldCacheRequest
+
+            if not isinstance(worldcache_config, WorldCacheConfig):
+                raise TypeError("worldcache_config must be a WorldCacheConfig")
+            if num_steps != 4 or guidance == 1.0 or guidance_interval is not None:
+                raise ValueError("WorldCache D/D/D/C requires four steps and both CFG branches at every step")
+            if velocity_postprocess_builder is not None or upsample_task is not None:
+                raise ValueError("WorldCache does not support velocity postprocessing or prompt upsampling")
+            if not isinstance(sampler if sampler is not None else self.sampler, UniPCSampler):
+                raise ValueError("WorldCache D/D/D/C requires the native UniPCSampler")
+            if dist.is_initialized() and dist.get_world_size() != 1:
+                raise ValueError("WorldCache minimal adapter supports single-rank inference only")
+            if self.config.compile.enabled or self.config.compile.use_cuda_graphs:
+                raise ValueError("WorldCache first version requires eager inference, no compile/CUDA graphs")
+            self._last_worldcache_report = None
+            worldcache_request = WorldCacheRequest(worldcache_config)
+
         if isinstance(seed, int):
             raise ValueError(
                 "Single integer seed is not supported anymore: `seed` must be a list of integers, one for each sample."
@@ -2602,6 +2640,9 @@ class OmniMoTModel(ImaginaireModel):
             )
         else:
             n_sample = len(initial_noise)
+
+        if worldcache_request is not None and (n_sample != 1 or not has_noisy_actions):
+            raise ValueError("WorldCache requires a single joint video/action policy sample")
 
         assert n_sample == len(seed), f"Number of samples {n_sample} must match number of seeds {len(seed)}"
 
@@ -2715,6 +2756,8 @@ class OmniMoTModel(ImaginaireModel):
                 # len(noise_x) == B, noise_x[i] is shape (D)
                 # timestep is shape (B, 1)
                 torch.compiler.cudagraph_mark_step_begin()
+                if worldcache_request is not None:
+                    worldcache_request.begin_step()
 
                 assert timestep.ndim == 2, f"timestep must be 2D, got {timestep.shape}"
                 assert timestep.shape == (1, 1), f"timestep must be (1, 1), got {timestep.shape}"
@@ -2738,6 +2781,18 @@ class OmniMoTModel(ImaginaireModel):
                     memory: MemoryState | None = (
                         InferenceTextKVMemoryState(text_kv_cache) if text_kv_cache is not None else None
                     )
+                    worldcache_kwargs = {}
+                    if worldcache_request is not None:
+                        if tokens is cond_tokens:
+                            branch = "conditional"
+                        elif tokens is uncond_tokens:
+                            branch = "unconditional"
+                        else:
+                            raise RuntimeError("Unknown CFG branch for WorldCache")
+                        worldcache_kwargs = {
+                            "worldcache_request": worldcache_request,
+                            "worldcache_branch": branch,
+                        }
                     return self._get_velocity(
                         net=net,
                         noise_x=noise_x,
@@ -2749,6 +2804,7 @@ class OmniMoTModel(ImaginaireModel):
                         packed_sequence_template=packed_sequence_template,
                         memory=memory,
                         has_noisy_actions=has_noisy_actions,
+                        **worldcache_kwargs,
                     )
 
                 needs_text_cfg = guidance != 1.0
@@ -2995,8 +3051,12 @@ class OmniMoTModel(ImaginaireModel):
                 result["action"] = result_action
             if self.config.sound_gen and len(result_sound) > 0:
                 result["sound"] = result_sound
+            if worldcache_request is not None:
+                self._last_worldcache_report = worldcache_request.finish()
             return result
         finally:
+            if worldcache_request is not None:
+                worldcache_request.clear()
             if previous_attention_dispatch is not None:
                 restore_inference_attention_dispatch(previous_attention_dispatch)
 

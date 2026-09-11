@@ -383,6 +383,16 @@ class RobolabServerArgs(pydantic.BaseModel):
     """Number of denoising steps."""
     shift: float = 5.0
     """UniPC sampler shift."""
+    eager: bool = False
+    """Disable torch.compile and CUDA graphs (also useful for paired Dense measurements)."""
+    worldcache_dddc: bool = False
+    """Experimental joint video/action WorldCache: three FULL steps, then one CACHE step. Forces eager."""
+    worldcache_stable_percentile: float = 0.30
+    """Stable curvature quantile over generated video + action tokens."""
+    worldcache_chaotic_percentile: float = 0.70
+    """Chaotic curvature quantile over generated video + action tokens."""
+    worldcache_n_max: int = 6
+    """Hermite damping parameter; D/D/D/C still caches exactly one step."""
 
     resolution: str | None = "480"
     """Action transform resolution. The default matches the released DROID RoboLab policy."""
@@ -459,6 +469,18 @@ class RobolabServerArgs(pydantic.BaseModel):
             raise ValueError("--rope-qk-capture-branches must not contain duplicates")
         if self.guidance == 1.0 and "unconditional" in self.rope_qk_capture_branches:
             raise ValueError("Unconditional RoPE Q/K capture requires CFG guidance != 1")
+        if self.worldcache_dddc:
+            from cosmos_framework.inference.worldcache import WorldCacheConfig
+
+            WorldCacheConfig(
+                self.worldcache_stable_percentile, self.worldcache_chaotic_percentile, self.worldcache_n_max
+            )
+            if self.num_steps != 4 or self.sampler != "unipc" or self.guidance == 1.0:
+                raise ValueError("--worldcache-dddc requires four UniPC steps with guidance != 1")
+            if enabled_capture_count:
+                raise ValueError("WorldCache cannot be combined with dense hidden/residual/QK collectors")
+            if not self.use_state or self.history_length != 1 or self.action_chunk_size != 32:
+                raise ValueError("WorldCache requires q0 state + 32 generated actions")
         return self
 
 
@@ -480,6 +502,14 @@ class RobolabPolicyService:
         self.pipe: OmniInference = pipe
         self.model = pipe.model
         self.model.eval()
+        self._worldcache_config = None
+        if args.worldcache_dddc:
+            from cosmos_framework.inference.worldcache import WorldCacheConfig
+
+            self._worldcache_config = WorldCacheConfig(
+                args.worldcache_stable_percentile, args.worldcache_chaotic_percentile, args.worldcache_n_max
+            )
+            log.info("[worldcache] enabled D/D/D/C joint video/action, eager, request-local FULL history")
         assert isinstance(pipe.setup_args, OmniSetupArgs)
         self.setup_args: OmniSetupArgs = pipe.setup_args
 
@@ -614,6 +644,8 @@ class RobolabPolicyService:
             args.hidden_state_capture_dir is not None
             or args.block_residual_capture_dir is not None
             or args.rope_qk_capture_dir is not None
+            or args.eager
+            or args.worldcache_dddc
         ):
             # Experiment hooks must observe eager transformer/attention calls.
             setup_overrides["use_torch_compile"] = False
@@ -826,7 +858,14 @@ class RobolabPolicyService:
                             seed=[seed],
                             num_steps=self.cfg.num_steps,
                             shift=self.cfg.shift,
+                            worldcache_config=self._worldcache_config,
                         )
+                        if self._worldcache_config is not None:
+                            report = self.model._last_worldcache_report
+                            log.info(
+                                f"[worldcache] D/D/D/C full_forwards={report['full_forwards']} "
+                                f"cache_forwards={report['cache_forwards']}"
+                            )
                     else:
                         with collector:
                             samples = self.model.generate_samples_from_batch(

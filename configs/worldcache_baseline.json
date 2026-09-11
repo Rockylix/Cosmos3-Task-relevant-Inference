@@ -1,0 +1,56 @@
+{
+  "mode": "worldcache_dddc_joint",
+  "schedule": ["D", "D", "D", "C"],
+  "cfg_history": "independent",
+  "cache_scope": "future_video_and_predicted_action",
+  "config": {
+    "percentile_stable": 0.30,
+    "percentile_chaotic": 0.70,
+    "n_max": 6,
+    "eps": 1e-8,
+    "check_finite": true
+  },
+  "protocol": {
+    "num_steps": 4,
+    "shift": 5,
+    "guidance": 3,
+    "sampler": "unipc",
+    "compile": false,
+    "cuda_graphs": false,
+    "policy_seed": 0,
+    "simulator_seed": 0,
+    "deterministic_seed": false,
+    "reset_policy_rng_each_task": true,
+    "format_prompt_as_json": true,
+    "rollouts_each": 1,
+    "episode_retries": 0,
+    "official_task_step_limits": true,
+    "video_mode": "none",
+    "tasks": [
+      "BananaInBowlTask",
+      "BananaOnPlateTask",
+      "ButterAboveRaisinTask",
+      "BowlStackingLeftOnRightTask",
+      "GrabABagelTask",
+      "LargerObjectRaisinBoxInBinTask",
+      "MustardInLeftBinTask",
+      "RubiksCubeTask",
+      "RubiksCubeLeftOfBowlTask",
+      "MarkerInMugTask"
+    ]
+  },
+  "tested": {
+    "source_run": "experiments/worldcache_dddc_smoke10_v2",
+    "completed": 10,
+    "success_count": 5,
+    "score_mean": 0.46666666865348816,
+    "chunk_median_macro_s": 0.6709144461492542,
+    "paired_dense_chunk_median_macro_s": 0.8639655399427284,
+    "speedup_over_paired_dense": 1.2877432359692063,
+    "inference_source_sha256": {
+      "cosmos_framework/inference/worldcache.py": "4e53548ed11d0f54ae855ce00244d0e2e72f046c49b238ee621fc270ca170499",
+      "cosmos_framework/model/generator/omni_mot_model.py": "49ec40f92dee43d3be3eebc89d59d7c05cc07f89674987e8002dae4857e86dfc",
+      "cosmos_framework/scripts/action_policy_server_robolab.py": "dc06b049ccbd0581b32197b0301089fc6a04743cc62d1ab984f0cb9ad08a572a"
+    }
+  }
+}
