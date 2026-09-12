@@ -598,7 +598,8 @@ class PackedAttentionMoT(nn.Module):
         packed_position_embeddings: tuple[SequencePack, SequencePack],
         natten_metadata: dict | None = None,
         memory_value: MemoryValue | None = None,
-    ) -> tuple[SequencePack, KVToStore | None]:
+        asi_profile_geometry: tuple[int, int, int] | None = None,
+    ) -> tuple[SequencePack, KVToStore | None] | tuple[SequencePack, KVToStore | None, torch.Tensor]:
         """Forward pass with optional memory-augmented attention.
 
         When ``memory_value`` is provided, ``dispatch_attention_fn`` routes to
@@ -728,7 +729,7 @@ class PackedAttentionMoT(nn.Module):
             packed_key_states_normalized_ = None
 
         attention_stats_inputs: dict[str, Any] | None = None
-        if self._attention_stats_capture_callback is not None:
+        if self._attention_stats_capture_callback is not None or asi_profile_geometry is not None:
             num_gen_tokens = int(pack["_num_full_tokens"])
             cached_und_k = getattr(memory_value, "und_k_cached", None)
             cached_und_v = getattr(memory_value, "und_v_cached", None)
@@ -739,7 +740,9 @@ class PackedAttentionMoT(nn.Module):
                 actual_und_v_for_gen = cached_und_v.squeeze(0)
             else:
                 actual_und_k_for_gen = k_und_for_gen_ if self.k_norm_und_for_gen is not None else k_und_
-                actual_und_v_for_gen = v_und
+                num_und_tokens = int(pack["_num_causal_tokens"])
+                actual_und_k_for_gen = actual_und_k_for_gen[:num_und_tokens]
+                actual_und_v_for_gen = v_und[:num_und_tokens]
             attention_stats_inputs = {
                 "layer_index": self.layer_idx,
                 "q_gen": q_gen_[:num_gen_tokens],
@@ -759,7 +762,16 @@ class PackedAttentionMoT(nn.Module):
             memory_value=memory_value,
             packed_key_states_normalized=packed_key_states_normalized_,
         )
-        if attention_stats_inputs is not None:
+        asi_profile = None
+        if asi_profile_geometry is not None:
+            from cosmos_framework.inference.edge_core_stable_fast import action_aligned_future_profiles
+
+            asi_profile = action_aligned_future_profiles(
+                attention_stats_inputs["q_gen"], attention_stats_inputs["k_ar"],
+                attention_stats_inputs["k_gen"], attention_stats_inputs["v_ar"],
+                attention_stats_inputs["v_gen"], self.scaling, asi_profile_geometry,
+            )
+        elif attention_stats_inputs is not None:
             actual_gen_attn_output = get_gen_seq(packed_attn_output)[:num_gen_tokens].reshape(
                 -1, self.num_attention_heads, self.head_dim
             )
@@ -824,7 +836,10 @@ class PackedAttentionMoT(nn.Module):
         else:
             und_seq = self.o_proj(get_und_seq(packed_attn_output))  # [N_und,hidden_size]
             gen_seq = self.o_proj_moe_gen(get_gen_seq(packed_attn_output))  # [N_gen,hidden_size]
-        return from_und_gen_splits(und_seq, gen_seq, pack), kv_to_store  # [N_und+N_gen,hidden_size]
+        result = from_und_gen_splits(und_seq, gen_seq, pack)
+        if asi_profile_geometry is not None:
+            return result, kv_to_store, asi_profile
+        return result, kv_to_store  # [N_und+N_gen,hidden_size]
 
     def reasoner_forward(
         self,
@@ -1186,6 +1201,7 @@ class MoTDecoderLayer(nn.Module):
         natten_metadata: dict | None = None,
         memory_value: MemoryValue | None = None,
         gen_only: bool = False,
+        asi_profile_geometry: tuple[int, int, int] | None = None,
     ) -> tuple[SequencePack, dict[str, LBLMetadata], KVToStore | None]:
         """Forward pass with MoT routing and optional memory-augmented attention.
 
@@ -1238,13 +1254,15 @@ class MoTDecoderLayer(nn.Module):
                 from_und_gen_splits(_empty_sin_und, get_gen_seq(_sin), _sin),
             )
 
-            pack_attn_out, kv_to_store = self.self_attn(
+            attention_result = self.self_attn(
                 gen_pack,
                 attention_mask,
                 gen_position_embeddings,
                 natten_metadata=natten_metadata,
                 memory_value=memory_value,
+                asi_profile_geometry=asi_profile_geometry,
             )
+            pack_attn_out, kv_to_store = attention_result[:2]
             gen_attn_out = get_gen_seq(pack_attn_out)
             # No residual_und here: the gen_only MLP branch below builds its own
             # length-0 und sequence for ``mlp_out_und_seq``; carrying one through
@@ -1252,13 +1270,15 @@ class MoTDecoderLayer(nn.Module):
             residual_gen = get_gen_seq(input) + gen_attn_out
         else:
             # STANDARD PATH: Process both und and gen tokens
-            pack_attn_out, kv_to_store = self.self_attn(
+            attention_result = self.self_attn(
                 pack_norm_out,
                 attention_mask,
                 packed_position_embeddings,
                 natten_metadata=natten_metadata,
                 memory_value=memory_value,
+                asi_profile_geometry=asi_profile_geometry,
             )
+            pack_attn_out, kv_to_store = attention_result[:2]
             residual_und = get_und_seq(input) + get_und_seq(pack_attn_out)  # [N_und,hidden_size]
             residual_gen = get_gen_seq(input) + get_gen_seq(pack_attn_out)  # [N_gen,hidden_size]
 
@@ -1317,6 +1337,9 @@ class MoTDecoderLayer(nn.Module):
 
             mlp_out_und_seq = residual_und + mlp_out_und  # [N_und,hidden_size]
             mlp_out_gen_seq = residual_gen + mlp_out_gen  # [N_gen,hidden_size]
+
+        if asi_profile_geometry is not None:
+            lbl_metadata_dict["asi_profile"] = attention_result[2]
 
         return from_und_gen_splits(mlp_out_und_seq, mlp_out_gen_seq, input), lbl_metadata_dict, kv_to_store
 
