@@ -9,10 +9,12 @@ init_script()
 
 import socket
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+import pydantic
 import torch
 
+from cosmos_framework.inference.edge_core_stable import Version1Controller as OptimizedVersion1Controller
 from cosmos_framework.scripts.action_policy_server_robolab import (
     RobolabPolicyService,
     RobolabServerArgs,
@@ -29,16 +31,31 @@ from cosmos_framework.utils import log
 
 
 class Version1ServerArgs(RobolabServerArgs):
+    asi_execution: Literal["legacy", "optimized-eager", "compile", "compile-graph"] = "legacy"
+    """Execution implementation; all modes keep the fixed C80/S104 algorithm."""
     format_prompt_as_json: bool | None = True
     """Use the structured prompt format expected by the Edge policy checkpoint."""
     version1_output_dir: Path | None = None
     """Optional per-request selection artifacts; disabled by default."""
 
+    @pydantic.model_validator(mode="after")
+    def _validate_execution_capture(self) -> "Version1ServerArgs":
+        if self.asi_execution in ("compile", "compile-graph") and any(
+            p is not None
+            for p in (self.hidden_state_capture_dir, self.block_residual_capture_dir, self.rope_qk_capture_dir)
+        ):
+            raise ValueError("Eager attention/block capture requires --asi-execution legacy or optimized-eager")
+        return self
+
 
 class Version1PolicyService(RobolabPolicyService):
     def _build_setup_args(self, args: RobolabServerArgs) -> Any:
         setup = super()._build_setup_args(args)
-        updates = {"use_torch_compile": False, "use_cuda_graphs": False}
+        mode = getattr(args, "asi_execution", "legacy")
+        updates = {
+            "use_torch_compile": mode in ("compile", "compile-graph"),
+            "use_cuda_graphs": mode == "compile-graph",
+        }
         return setup.model_copy(update=updates)
 
     def __init__(self, args: Version1ServerArgs) -> None:
@@ -55,7 +72,19 @@ class Version1PolicyService(RobolabPolicyService):
 
         def version1_generate(*generate_args: Any, **generate_kwargs: Any) -> Any:
             request_index = self._request_count
-            controller = Version1Controller(
+            controller_cls = Version1Controller if args.asi_execution == "legacy" else OptimizedVersion1Controller
+            execution_kwargs = (
+                {}
+                if args.asi_execution == "legacy"
+                else dict(
+                    optimized=True,
+                    compile_profile_decoder=True,
+                    compile_profile_kernel=False,
+                    cuda_graphs=args.asi_execution == "compile-graph",
+                    cache_layout=True,
+                )
+            )
+            controller = controller_cls(
                 torch=torch,
                 net=self.model.net,
                 guidance=float(generate_kwargs.get("guidance", self.cfg.guidance)),
@@ -65,12 +94,16 @@ class Version1PolicyService(RobolabPolicyService):
                     if self._version1_output_dir is not None
                     else None
                 ),
+                **execution_kwargs,
             )
             with controller:
                 samples = original_generate(*generate_args, **generate_kwargs)
             summary = controller.finish()
             self._request_count += 1
-            log.info(f"[robolab-version1] request={request_index} strategy={summary['strategy_version']}")
+            log.info(
+                f"[robolab-version1] request={request_index} strategy={summary['strategy_version']} "
+                f"execution={args.asi_execution}"
+            )
             return samples
 
         self.model.generate_samples_from_batch = version1_generate
