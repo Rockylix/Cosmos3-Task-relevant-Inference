@@ -5,16 +5,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from cosmos_framework.inference.edge_core_stable_layout import _action_query_layout
 from cosmos_framework.inference import edge_core_stable as policy
+from cosmos_framework.inference.edge_core_stable_layout import _action_query_layout
 
 
 def _records():
     rng = torch.Generator().manual_seed(73)
-    return [
-        {"block": b, "profiles": torch.rand((8, 340), generator=rng) + 0.01}
-        for b in range(28)
-    ]
+    return [{"block": b, "profiles": torch.rand((8, 340), generator=rng) + 0.01} for b in range(28)]
 
 
 def _layout(spatial=340):
@@ -41,31 +38,19 @@ def _reference_attention(*, query, key, value, scale, return_lse, **kwargs):
     key = key.repeat_interleave(repeat, dim=2)
     value = value.repeat_interleave(repeat, dim=2)
     logits = torch.einsum("bqhd,bkhd->bhqk", query, key) * scale
-    return torch.einsum("bhqk,bkhd->bqhd", logits.softmax(-1), value), logits.logsumexp(
+    return torch.einsum("bhqk,bkhd->bqhd", logits.softmax(-1), value), logits.logsumexp(-1).permute(0, 2, 1).unsqueeze(
         -1
-    ).permute(0, 2, 1).unsqueeze(-1)
+    )
 
 
 def _reference_profile(q, ka, kg, layout, weights):
-    actions = torch.tensor(
-        [
-            r["gen_position"]
-            for r in layout["action_queries"]
-            if r["query_role"] == "predicted"
-        ]
-    )
+    actions = torch.tensor([r["gen_position"] for r in layout["action_queries"] if r["query_role"] == "predicted"])
     keys = torch.cat([ka, kg]).repeat_interleave(q.shape[1] // kg.shape[1], dim=1)
-    probs = (
-        torch.einsum("qhd,khd->hqk", q[actions].float() * 0.25, keys.float())
-        .softmax(-1)
-        .mean(0)
-    )
+    probs = torch.einsum("qhd,khd->hqk", q[actions].float() * 0.25, keys.float()).softmax(-1).mean(0)
     return torch.stack(
         [
             (
-                probs[4 * i : 4 * i + 4][
-                    :, len(ka) + torch.tensor(layout["latent_positions"][f"L{i + 1}"])
-                ]
+                probs[4 * i : 4 * i + 4][:, len(ka) + torch.tensor(layout["latent_positions"][f"L{i + 1}"])]
                 * torch.tensor(weights)[:, None]
             ).sum(0)
             for i in range(8)
@@ -107,9 +92,7 @@ def test_action_weighted_lse_matches_independent_softmax(monkeypatch):
 
 def test_fixed_policy_rejects_ablation_arguments():
     with pytest.raises(TypeError):
-        policy.build_core_stable_plan(
-            torch=torch, profile_records=_records(), core_token_budget=64
-        )
+        policy.build_core_stable_plan(torch=torch, profile_records=_records(), core_token_budget=64)
     with pytest.raises(ValueError, match="CFG 3"):
         policy.Version1Controller(torch=torch, net=None, guidance=1.0, num_steps=4)
 
@@ -117,16 +100,11 @@ def test_fixed_policy_rejects_ablation_arguments():
 def test_layout_includes_condition_frame_and_all_actions():
     layout = _layout()
     plan = policy.build_core_stable_plan(torch=torch, profile_records=_records())
-    selected = policy._selected_original_positions(
-        torch, layout, plan["execution_mask"], "cpu"
-    )
+    selected = policy._selected_original_positions(torch, layout, plan["execution_mask"], "cpu")
     assert selected.numel() == 340 + 8 * 184 + 33
     assert torch.isin(torch.tensor(layout["latent_positions"]["L0"]), selected).all()
     assert torch.isin(torch.tensor(layout["action_positions"]), selected).all()
-    assert (
-        len([q for q in layout["action_queries"] if q["query_role"] == "predicted"])
-        == 32
-    )
+    assert len([q for q in layout["action_queries"] if q["query_role"] == "predicted"]) == 32
 
 
 def test_lse_failure_propagates_without_alternative_backend(monkeypatch):
@@ -150,31 +128,22 @@ def test_lse_failure_propagates_without_alternative_backend(monkeypatch):
         )
 
 
-def test_each_stack_updates_l0_and_restores_only_current_input():
+@pytest.mark.parametrize("optimized", [False, True])
+def test_each_stack_updates_l0_and_restores_only_current_input(optimized):
     class Layer:
         def __call__(self, pack, *args, **kwargs):
             return (
-                policy.from_und_gen_splits(
-                    policy.get_und_seq(pack), policy.get_gen_seq(pack) + 1, pack
-                ),
+                policy.from_und_gen_splits(policy.get_und_seq(pack), policy.get_gen_seq(pack) + 1, pack),
                 {},
                 None,
             )
 
     layers = [Layer() for _ in range(28)]
-    net = SimpleNamespace(
-        language_model=SimpleNamespace(model=SimpleNamespace(layers=layers))
-    )
-    controller = policy.Version1Controller(
-        torch=torch, net=net, guidance=3.0, num_steps=4
-    )
+    net = SimpleNamespace(language_model=SimpleNamespace(model=SimpleNamespace(layers=layers)))
+    controller = policy.Version1Controller(torch=torch, net=net, guidance=3.0, num_steps=4, optimized=optimized)
     controller._layout = _layout()
-    controller.plan = policy.build_core_stable_plan(
-        torch=torch, profile_records=_records()
-    )
-    selected = policy._selected_original_positions(
-        torch, controller._layout, controller.plan["execution_mask"], "cpu"
-    )
+    controller.plan = policy.build_core_stable_plan(torch=torch, profile_records=_records())
+    selected = policy._selected_original_positions(torch, controller._layout, controller.plan["execution_mask"], "cpu")
     for step in range(1, 4):
         for branch in ["conditional", "unconditional"]:
             value = 100 * step + (50 if branch == "unconditional" else 0)
@@ -227,12 +196,8 @@ def test_profile_bypasses_compiled_wrapper_and_cleans_callback_on_error():
             raise AssertionError("profiling entered compiled graph")
 
     layer = CompiledLayer()
-    net = SimpleNamespace(
-        language_model=SimpleNamespace(model=SimpleNamespace(layers=[layer] * 28))
-    )
-    controller = policy.Version1Controller(
-        torch=torch, net=net, guidance=3, num_steps=4
-    )
+    net = SimpleNamespace(language_model=SimpleNamespace(model=SimpleNamespace(layers=[layer] * 28)))
+    controller = policy.Version1Controller(torch=torch, net=net, guidance=3, num_steps=4)
     controller._position_embeddings = ({}, {})
     with pytest.raises(RuntimeError, match="profile failure"):
         controller._run_dense_profile_layer(
@@ -248,18 +213,13 @@ def test_profile_bypasses_compiled_wrapper_and_cleans_callback_on_error():
     assert controller._profile_callback_block is None
 
 
-def test_sparse_pack_preserves_logical_text_length_with_graph_padding():
-    net = SimpleNamespace(
-        language_model=SimpleNamespace(model=SimpleNamespace(layers=[None] * 28))
-    )
-    controller = policy.Version1Controller(
-        torch=torch, net=net, guidance=3, num_steps=4
-    )
+@pytest.mark.parametrize("optimized", [False, True])
+def test_sparse_pack_preserves_logical_text_length_with_graph_padding(optimized):
+    net = SimpleNamespace(language_model=SimpleNamespace(model=SimpleNamespace(layers=[None] * 28)))
+    controller = policy.Version1Controller(torch=torch, net=net, guidance=3, num_steps=4, optimized=optimized)
     # Five real text tokens in an eight-row allocation. Padded rows must never
     # be counted as text attention keys after sparse repacking.
-    pack = policy._make_sequence_pack(
-        und_seq=torch.zeros(8, 2), gen_seq=torch.zeros(20, 2), und_tokens=5
-    )
+    pack = policy._make_sequence_pack(und_seq=torch.zeros(8, 2), gen_seq=torch.zeros(20, 2), und_tokens=5)
     controller._position_embeddings = (pack, pack)
     sparse, rope = controller._slice_pack_and_rope(pack, torch.tensor([0, 2, 7]))
     for item in [sparse, *rope]:
@@ -269,9 +229,7 @@ def test_sparse_pack_preserves_logical_text_length_with_graph_padding():
 
 
 @pytest.mark.parametrize("spatial,heads,kv_heads", [(3, 4, 2), (360, 8, 2)])
-def test_batched_profile_matches_independent_reference(
-    monkeypatch, spatial, heads, kv_heads
-):
+def test_batched_profile_matches_independent_reference(monkeypatch, spatial, heads, kv_heads):
     from cosmos_framework.inference import edge_core_stable_fast as fast
 
     monkeypatch.setattr(fast, "attention", _reference_attention)
@@ -307,3 +265,53 @@ def test_deferred_profile_validation_rejects_nan():
     records[12]["profiles"][2, 4] = float("nan")
     with pytest.raises(RuntimeError, match="NaN/Inf"):
         policy.build_core_stable_plan(torch=torch, profile_records=records)
+
+
+def test_cfg_metadata_and_rope_reuse_preserves_actual_positions():
+    net = SimpleNamespace(language_model=SimpleNamespace(model=SimpleNamespace(layers=[None] * 28)))
+    ctrl = policy.Version1Controller(torch=torch, net=net, guidance=3, num_steps=4, optimized=True)
+    selected = torch.tensor([0, 2, 7])
+    for und_len in [5, 11, 5, 17, 11]:
+        gen = torch.arange(40).reshape(20, 2).float() + und_len
+        und = torch.full((32, 2), float(und_len))
+        pack = policy._make_sequence_pack(und_seq=und, gen_seq=gen, und_tokens=und_len)
+        cos = policy._make_sequence_pack(und_seq=und + 100, gen_seq=gen + 100, und_tokens=und_len)
+        sin = policy._make_sequence_pack(und_seq=und + 200, gen_seq=gen + 200, und_tokens=und_len)
+        ctrl._position_embeddings = (cos, sin)
+        sparse, rope = ctrl._slice_pack_and_rope(pack, selected)
+        assert sparse["_num_causal_tokens"] == und_len
+        assert sparse["_num_full_tokens"] == 3
+        torch.testing.assert_close(policy.get_gen_seq(sparse), gen[selected], rtol=0, atol=0)
+        for output, offset in zip(rope, [100, 200], strict=True):
+            assert output["_num_causal_tokens"] == und_len
+            torch.testing.assert_close(policy.get_gen_seq(output), (gen + offset)[selected], rtol=0, atol=0)
+            torch.testing.assert_close(policy.get_und_seq(output), und + offset, rtol=0, atol=0)
+    assert len(ctrl._sparse_metadata) == 3
+
+
+def test_compiled_profile_retains_independent_storage():
+    net = SimpleNamespace(language_model=SimpleNamespace(model=SimpleNamespace(layers=[None] * 28)))
+    ctrl = policy.Version1Controller(torch=torch, net=net, guidance=3, num_steps=4, optimized=True)
+    ctrl._position_embeddings = ({}, {})
+    buffer = torch.zeros(8, 340)
+
+    def replay(*args, **kwargs):
+        buffer.add_(1)
+        return {}, {"asi_profile": buffer}, None
+
+    for block in range(28):
+        ctrl._run_dense_profile_layer(
+            block=block, decoder_layer=replay, hidden_states={}, attention_mask=None, memory_value=None, gen_only=True
+        )
+    for block, record in enumerate(ctrl._profile_records):
+        assert (record["profiles"] == block + 1).all()
+
+
+def test_selection_matches_legacy_exactly():
+    from cosmos_framework.scripts import robolab_version1 as legacy
+
+    records = _records()
+    old, new = [module.build_core_stable_plan(torch=torch, profile_records=records) for module in [legacy, policy]]
+    assert old["core_blocks"] == new["core_blocks"]
+    for key in ("core_masks", "stable_mask", "execution_mask", "block_quality"):
+        torch.testing.assert_close(old[key], new[key], rtol=0, atol=0)

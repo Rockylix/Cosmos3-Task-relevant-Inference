@@ -295,7 +295,7 @@ class Version1Controller:
         self.compile_profile_kernel = compile_profile_kernel
         self.cache_layout = cache_layout
         self._layout_cache = {}
-        self._sparse_metadata = None
+        self._sparse_metadata = {}
         self._profile_geometry = None
         self.net = net
         self.output_dir = Path(output_dir) if output_dir is not None else None
@@ -371,6 +371,7 @@ class Version1Controller:
             self._layout = layout
             if self.optimized:
                 from cosmos_framework.inference.edge_core_stable_fast import profile_geometry
+
                 self._profile_geometry = profile_geometry(layout)
         elif layout != self._layout:
             raise RuntimeError("GEN/action token layout changed during Version1 inference")
@@ -418,11 +419,23 @@ class Version1Controller:
         if self._profile_callback_block != block or self._layout is None:
             raise RuntimeError("Version1 attention callback has stale block state")
         if self.optimized:
-            from cosmos_framework.inference.edge_core_stable_fast import action_aligned_future_profiles, compiled_profile_kernel
-            profile_fn = compiled_profile_kernel(self.cuda_graphs) if self.compile_profile_kernel else action_aligned_future_profiles
+            from cosmos_framework.inference.edge_core_stable_fast import (
+                action_aligned_future_profiles,
+                compiled_profile_kernel,
+            )
+
+            profile_fn = (
+                compiled_profile_kernel(self.cuda_graphs)
+                if self.compile_profile_kernel
+                else action_aligned_future_profiles
+            )
             profile = profile_fn(
-                kwargs["q_gen"], kwargs["k_ar"], kwargs["k_gen"],
-                kwargs["v_ar"], kwargs["v_gen"], float(kwargs["scaling"]),
+                kwargs["q_gen"],
+                kwargs["k_ar"],
+                kwargs["k_gen"],
+                kwargs["v_ar"],
+                kwargs["v_gen"],
+                float(kwargs["scaling"]),
                 self._profile_geometry,
             )
             # Retain each layer profile independently of CUDA Graph output storage.
@@ -453,12 +466,16 @@ class Version1Controller:
         assert self._position_embeddings is not None
         if self.optimized and self.compile_profile_decoder:
             output, metadata, kv = decoder_layer(
-                hidden_states, attention_mask, self._position_embeddings,
-                natten_metadata=None, memory_value=memory_value, gen_only=gen_only,
+                hidden_states,
+                attention_mask,
+                self._position_embeddings,
+                natten_metadata=None,
+                memory_value=memory_value,
+                gen_only=gen_only,
                 asi_profile_geometry=self._profile_geometry,
             )
             profile = metadata.pop("asi_profile")
-            self._profile_records.append({"block": block, "profiles": profile})
+            self._profile_records.append({"block": block, "profiles": profile.clone()})
             return output, metadata, kv
         attention_module = decoder_layer.self_attn
         if attention_module._attention_stats_capture_callback is not None:
@@ -502,16 +519,24 @@ class Version1Controller:
         if self.optimized:
             und_tokens = int(hidden_states["_num_causal_tokens"])
             gen_seq = get_gen_seq(hidden_states).index_select(0, selected_local)
-            if self._sparse_metadata is None:
-                self._sparse_metadata = _make_sequence_pack(
-                    und_seq=get_und_seq(hidden_states), und_tokens=und_tokens, gen_seq=gen_seq,
+            metadata_key = (und_tokens, int(gen_seq.shape[0]), gen_seq.device)
+            if metadata_key not in self._sparse_metadata:
+                self._sparse_metadata[metadata_key] = _make_sequence_pack(
+                    und_seq=get_und_seq(hidden_states),
+                    und_tokens=und_tokens,
+                    gen_seq=gen_seq,
                 )
-            elif self._sparse_metadata["_num_causal_tokens"] != und_tokens:
-                raise RuntimeError("ASI text length changed within a request")
-            sparse_pack = {**self._sparse_metadata, "causal_seq": get_und_seq(hidden_states), "full_only_seq": gen_seq}
+            sparse_pack = {
+                **self._sparse_metadata[metadata_key],
+                "causal_seq": get_und_seq(hidden_states),
+                "full_only_seq": gen_seq,
+            }
             rope = tuple(
-                {**sparse_pack, "causal_seq": get_und_seq(pack),
-                 "full_only_seq": get_gen_seq(pack).index_select(0, selected_local)}
+                {
+                    **sparse_pack,
+                    "causal_seq": get_und_seq(pack),
+                    "full_only_seq": get_gen_seq(pack).index_select(0, selected_local),
+                }
                 for pack in self._position_embeddings
             )
             return sparse_pack, rope
@@ -642,7 +667,13 @@ class Version1Controller:
             "unselected_future_hidden_restore": "current_stack_input",
             "dense_stack_count": self._dense_stacks,
             "sparse_stack_count": self._sparse_stacks,
-            "dense_profile_execution": ("compiled_batched" if self.compile_profile_decoder and any(hasattr(layer, "_orig_mod") for layer in self.layers) else "eager_batched") if self.optimized else "eager",
+            "dense_profile_execution": (
+                "compiled_batched"
+                if self.compile_profile_decoder and any(hasattr(layer, "_orig_mod") for layer in self.layers)
+                else "eager_batched"
+            )
+            if self.optimized
+            else "eager",
             "optimized": self.optimized,
             "profile_kernel_compiled": self.compile_profile_kernel,
             "compiled_layer_count": sum(hasattr(layer, "_orig_mod") for layer in self.layers),
