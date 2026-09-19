@@ -1,5 +1,7 @@
 # 观测 SpecPrune → 未来帧剪枝，Early-exit hidden 补全
 
+更新：十任务现已完成，Dense 4/10、Sparse 1/10。远端分支、可移植入口与最终参数见 [发布指南](specprune_release_cn.md)，编译/FLOPs结果见 [测速报告](specprune_compile_speed_cn.md)。下文保留分阶段执行记录，“等待确认/尚未完成/未commit”等是当时状态，不代表当前发布状态。
+
 本轮由用户确认：在真实观测上选区，剪枝应用到全部未来帧；被删除时保存 hidden，经正常输出头预测近似 velocity，以便继续完整去噪。十任务沿用之前 8 simple + 2 moderate 清单。**不是完整原版 SpecPrune-VLA 复现，不预设迁移必然失败。**
 
 ## 输入、计划、执行

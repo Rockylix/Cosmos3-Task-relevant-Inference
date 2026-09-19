@@ -1,0 +1,45 @@
+{
+  "mode": "observation_specprune_future_early_exit",
+  "config_role": "Frozen configuration manifest; runtime defaults in ExitConfig, verified by CPU test",
+  "config": {
+    "local_k": 32,
+    "global_k": 40,
+    "global_blocks": [13, 27],
+    "update_blocks": [14, 19, 24],
+    "prune_blocks": [10, 15, 20, 25],
+    "low_change_cap": 313,
+    "dynamic_threshold": 0.986,
+    "keep_ratio": 0.9,
+    "ema_beta": 0.2,
+    "min_observation_tokens": 60,
+    "controller": false
+  },
+  "selection": {
+    "local_global": "L0 query to instruction key",
+    "dynamic": "same-position real RGB observation comparison between chunks",
+    "layer_importance": "action q1..q32 to L0 key",
+    "plan": "step0 conditional once per chunk; shared spatial mask across L1..L8; nested by layer",
+    "restoration": "current-forward exit hidden before final RMSNorm/head; full CFG/UniPC each step",
+    "velocity_cache": false,
+    "action_controller": false
+  },
+  "protocol": {
+    "num_steps": 4, "shift": 5, "guidance": 3,
+    "policy_seed": 0, "simulator_seed": 0, "deterministic_seed": false,
+    "reset_policy_rng_each_task": true, "format_prompt_as_json": true,
+    "rollouts_each": 1, "episode_retries": 0, "official_task_step_limits": true,
+    "num_envs": 1, "video_mode": "none", "tested_backend": "eager",
+    "tasks": [
+      "BananaInBowlTask", "BananaOnPlateTask", "ButterAboveRaisinTask",
+      "BowlStackingLeftOnRightTask", "GrabABagelTask", "LargerObjectRaisinBoxInBinTask",
+      "MustardInLeftBinTask", "RubiksCubeTask", "RubiksCubeLeftOfBowlTask", "MarkerInMugTask"
+    ]
+  },
+  "tested": {
+    "dense_success": "4/10", "sparse_success": "1/10",
+    "dense_official_score": 0.46666666865348816, "sparse_official_score": 0.26666666865348815,
+    "dense_raw_score": 0.3666666686534882,
+    "source_run": "experiments/observation_specprune_exit_smoke10_s0_p0_v1/closed_loop_restart_v2",
+    "frozen_eager_commit": "d5c8fc6"
+  }
+}

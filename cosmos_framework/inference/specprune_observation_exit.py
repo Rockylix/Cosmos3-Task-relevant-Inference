@@ -22,10 +22,13 @@ from cosmos_framework.inference.specprune_future import SpecPruneFuture, resolve
 
 
 class SpecPruneObservationExit(SpecPruneFuture):
-    def __init__(self, model, config=ExitConfig()):
+    def __init__(self, model, config=ExitConfig(), *, compiled_layers=None):
         self.model, self.net, self.config = model, model.net, config
         self.plan = ObservationPlan(config)
         self.chunk = 0
+        self.compiled_layers = compiled_layers
+        if compiled_layers is not None and len(compiled_layers) != len(self.net.language_model.model.layers):
+            raise ValueError("Compiled layer count mismatch")
 
     def reset(self):
         self.plan.reset()
@@ -88,7 +91,8 @@ class SpecPruneObservationExit(SpecPruneFuture):
                 layer.self_attn._attention_stats_capture_callback = self._capture
             n_gen = len(get_gen_seq(runtime))
             try:
-                runtime, metadata, kv = layer(
+                execute = layer if capture or self.compiled_layers is None else self.compiled_layers[block]
+                runtime, metadata, kv = execute(
                     runtime, meta, rope, natten_metadata=None, memory_value=None, gen_only=False
                 )
             finally:
@@ -157,6 +161,8 @@ class SpecPruneObservationExit(SpecPruneFuture):
 
         if len(seed) != 1 or num_steps != 4 or guidance != 3 or shift != 5:
             raise ValueError("This experiment requires batch1, four steps, guidance3, shift5")
+        if self.compiled_layers is not None:
+            torch.compiler.cudagraph_mark_step_begin()
         net = self.net
         observation_rgb = None
         self.observation_geometry = None
