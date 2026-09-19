@@ -753,6 +753,18 @@ class PackedAttentionMoT(nn.Module):
                 "scaling": self.scaling,
             }
 
+        reuse_main_lse = asi_profile_geometry is not None and getattr(self, "_asi_reuse_main_lse", False)
+        if reuse_main_lse:
+            from cosmos_framework.model.generator.mot.inference_text_kv_memory import (
+                dispatch_attention_with_text_kv_memory,
+            )
+
+            if self.dispatch_attention_fn not in (dispatch_attention, dispatch_attention_with_text_kv_memory):
+                raise ValueError("ASI main-LSE does not support custom/parallel attention dispatch")
+            if bool(pack.get("is_sharded", False)) or torch.is_grad_enabled():
+                raise ValueError("ASI main-LSE requires unsharded inference")
+            if self.scaling != self.head_dim ** -0.5:
+                raise ValueError("ASI main-LSE requires matching main-attention scaling")
         packed_attn_output, kv_to_store = self.dispatch_attention_fn(
             packed_query_states_,
             packed_key_states_,
@@ -761,7 +773,15 @@ class PackedAttentionMoT(nn.Module):
             natten_metadata=natten_metadata,
             memory_value=memory_value,
             packed_key_states_normalized=packed_key_states_normalized_,
+            **({"return_gen_lse": True} if reuse_main_lse else {}),
         )
+        action_lse = None
+        if reuse_main_lse:
+            gen_lse = packed_attn_output.pop("_asi_gen_lse")
+            if tuple(gen_lse.shape) != (1, q_gen_.shape[0], self.num_attention_heads):
+                raise ValueError(f"Unexpected main GEN LSE shape: {tuple(gen_lse.shape)}")
+            action_start = asi_profile_geometry[0]
+            action_lse = gen_lse[:, action_start : action_start + 32]
         asi_profile = None
         if asi_profile_geometry is not None:
             from cosmos_framework.inference.edge_core_stable_fast import action_aligned_future_profiles
@@ -770,6 +790,7 @@ class PackedAttentionMoT(nn.Module):
                 attention_stats_inputs["q_gen"], attention_stats_inputs["k_ar"],
                 attention_stats_inputs["k_gen"], attention_stats_inputs["v_ar"],
                 attention_stats_inputs["v_gen"], self.scaling, asi_profile_geometry,
+                action_lse=action_lse,
             )
         elif attention_stats_inputs is not None:
             actual_gen_attn_output = get_gen_seq(packed_attn_output)[:num_gen_tokens].reshape(

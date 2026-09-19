@@ -14,10 +14,10 @@ from dataclasses import dataclass
 
 import torch
 
+from cosmos_framework.data.generator.sequence_packing.runtime import SequencePack, from_und_gen_splits, get_gen_seq
 from cosmos_framework.model.attention import attention
 from cosmos_framework.model.generator.mot.attention import SplitInfo, dispatch_attention
 from cosmos_framework.model.generator.utils.memory import KVToStore, MemoryState, MemoryValue
-from cosmos_framework.data.generator.sequence_packing.runtime import SequencePack, from_und_gen_splits, get_gen_seq
 
 
 class UndKVCache:
@@ -102,6 +102,7 @@ def _attention_gen_with_cached_text(
     packed_key_states: SequencePack,
     packed_value_states: SequencePack,
     memory_value: InferenceTextKVMemoryValue,
+    return_gen_lse: bool = False,
 ) -> tuple[SequencePack, KVToStore | None]:
     """Gen-only attention attending to cached text K/V plus current gen K/V."""
     q_gen = get_gen_seq(packed_query_states)  # [S_curr, H, D]
@@ -127,8 +128,10 @@ def _attention_gen_with_cached_text(
         key=k_full,
         value=v_full,
         is_causal=False,
-        return_lse=False,
+        return_lse=return_gen_lse,
     )
+    if return_gen_lse:
+        attn_result, gen_lse = attn_result
     assert isinstance(attn_result, torch.Tensor)
     gen_out = attn_result.squeeze(0).flatten(-2, -1)  # [S_curr, H*D]
 
@@ -137,6 +140,8 @@ def _attention_gen_with_cached_text(
         gen_out,
         packed_query_states,
     )
+    if return_gen_lse:
+        output["_asi_gen_lse"] = gen_lse
     return output, None
 
 
@@ -148,18 +153,30 @@ def dispatch_attention_with_text_kv_memory(
     natten_metadata: dict | None = None,
     memory_value: MemoryValue | None = None,
     packed_key_states_normalized: SequencePack | None = None,
+    return_gen_lse: bool = False,
 ) -> tuple[SequencePack, KVToStore | None]:
     """Dispatch attention with optional request-local text K/V reuse.
 
     Falls through to standard ``dispatch_attention`` when ``memory_value`` is
     ``None`` or still on the first (cache-fill) step.
     """
+    if return_gen_lse and (
+        not hasattr(attention_mask, "is_three_way")
+        or attention_mask.is_three_way
+        or getattr(attention_mask, "control_stream_token_ranges", None) is not None
+        or natten_metadata is not None
+        or torch.is_grad_enabled()
+        or bool(packed_query_states.get("is_sharded", False))
+        or packed_query_states["sample_offsets"].shape[0] != 2
+    ):
+        raise ValueError("ASI main-LSE requires unsharded single-sample two-way inference")
     if isinstance(memory_value, InferenceTextKVMemoryValue) and memory_value.frame_idx > 0:
         return _attention_gen_with_cached_text(
             packed_query_states,
             packed_key_states,
             packed_value_states,
             memory_value,
+            **({"return_gen_lse": True} if return_gen_lse else {}),
         )
     return dispatch_attention(
         packed_query_states,
@@ -169,6 +186,7 @@ def dispatch_attention_with_text_kv_memory(
         natten_metadata=natten_metadata,
         memory_value=None,
         packed_key_states_normalized=packed_key_states_normalized,
+        **({"return_gen_lse": True} if return_gen_lse else {}),
     )
 
 

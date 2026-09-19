@@ -21,7 +21,7 @@ def profile_geometry(layout):
     return actions[0], future[0], spatial
 
 
-def action_aligned_future_profiles(q_gen, k_ar, k_gen, v_ar, v_gen, scaling, geometry):
+def action_aligned_future_profiles(q_gen, k_ar, k_gen, v_ar, v_gen, scaling, geometry, *, action_lse=None):
     """Same LSE-based action relevance, batched over eight frames, with no host reads.
 
     Nonfinite/negative profiles are checked by build_core_stable_plan once all
@@ -31,13 +31,18 @@ def action_aligned_future_profiles(q_gen, k_ar, k_gen, v_ar, v_gen, scaling, geo
     heads, width = q_gen.shape[1:]
     kv_heads = k_gen.shape[1]
     q_action = q_gen[action_start : action_start + 32]
-    _, lse = attention(
-        query=q_action.unsqueeze(0),
-        key=torch.cat((k_ar, k_gen), dim=0).unsqueeze(0),
-        value=torch.cat((v_ar, v_gen), dim=0).unsqueeze(0),
-        scale=scaling,
-        return_lse=True,
-    )
+    if action_lse is None:
+        _, lse = attention(
+            query=q_action.unsqueeze(0),
+            key=torch.cat((k_ar, k_gen), dim=0).unsqueeze(0),
+            value=torch.cat((v_ar, v_gen), dim=0).unsqueeze(0),
+            scale=scaling,
+            return_lse=True,
+        )
+    else:
+        lse = action_lse
+        if tuple(lse.shape) != (1, 32, heads):
+            raise ValueError(f"Unexpected action LSE shape {tuple(lse.shape)}")
     # Keep the reference float32 dot product and reduction order within a frame.
     queries = q_action.float().reshape(8, 4, heads, width).permute(0, 2, 1, 3).contiguous()
     keys = k_gen[future_start : future_start + 8 * spatial].float()

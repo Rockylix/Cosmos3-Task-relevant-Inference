@@ -115,6 +115,7 @@ def two_way_attention(
     packed_key_states: SequencePack,
     packed_value_states: SequencePack,
     packed_key_states_normalized: SequencePack | None = None,
+    return_gen_lse: bool = False,
 ):
     """
     Performs two-way attention with causal and full attention.
@@ -165,6 +166,8 @@ def two_way_attention(
     # code path there prevents torch.compile from specializing on both shapes and incurring
     # the associated recompilation overhead.
     use_dense = num_samples == 1 and not torch.is_grad_enabled()
+    if return_gen_lse and not use_dense:
+        raise ValueError("ASI main-LSE requires single-sample inference")
 
     if use_dense:
         causal_varlen_kwargs = {}
@@ -203,13 +206,18 @@ def two_way_attention(
         full_q.unsqueeze(0),  # [1,N_full,heads,head_dim]
         get_all_seq(packed_key_normalized).unsqueeze(0),  # [1,N_all,heads,head_dim]  normed und K for gen
         get_all_seq(packed_value_states).unsqueeze(0),  # [1,N_all,heads,head_dim]
+        **({"return_lse": True} if return_gen_lse else {}),
         **full_varlen_kwargs,
     )  # [1,N_full,heads,head_dim]
+    if return_gen_lse:
+        full_res, gen_lse = full_res
 
     # [1,N_full,heads,head_dim] -> [N_full,heads,head_dim] -> [N_full,heads*head_dim]
     full_out = full_res.squeeze(0).flatten(-2, -1)  # type: ignore  # [N_full,heads*head_dim]
 
     out_all = from_mode_splits(causal_out, full_out, packed_query_states)
+    if return_gen_lse:
+        out_all["_asi_gen_lse"] = gen_lse
     return out_all
 
 
@@ -525,10 +533,13 @@ def dispatch_attention(
     natten_metadata: dict | None = None,
     memory_value: MemoryValue | None = None,
     packed_key_states_normalized: SequencePack | None = None,
+    return_gen_lse: bool = False,
 ) -> tuple[SequencePack, KVToStore | None]:
     assert memory_value is None, "Base dispatch_attention does not handle MemoryValue"
     if not _is_split_info_compatible(attention_mask):
         raise TypeError(f"Unsupported attention metadata: {type(attention_mask)}")
+    if return_gen_lse and (attention_mask.control_stream_token_ranges is not None or attention_mask.is_three_way or natten_metadata is not None):
+        raise ValueError("ASI main-LSE only supports standard two-way attention")
     if attention_mask.control_stream_token_ranges is not None:
         output = multi_control_two_way_attention(
             packed_query_states,
@@ -551,6 +562,7 @@ def dispatch_attention(
             packed_key_states,
             packed_value_states,
             packed_key_states_normalized=packed_key_states_normalized,
+            **({"return_gen_lse": True} if return_gen_lse else {}),
         )
     return output, None
 
