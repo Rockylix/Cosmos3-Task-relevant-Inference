@@ -1,0 +1,6 @@
+{
+  "local_k": 58,
+  "global_k": 72,
+  "min_observation_tokens": 184,
+  "keep_ratio": 0.9
+}

@@ -8,6 +8,7 @@ import tyro
 from cosmos_framework.inference.common.args import tyro_cli
 from cosmos_framework.inference.specprune_exit_compile import compile_exit_layers
 from cosmos_framework.inference.specprune_observation_exit import SpecPruneObservationExit
+from cosmos_framework.inference.specprune_exit_plan import ExitConfig
 from cosmos_framework.scripts.action_policy_server_robolab import (
     RobolabPolicyService,
     RobolabServerArgs,
@@ -18,6 +19,10 @@ from cosmos_framework.scripts.action_policy_server_robolab import (
 class SpecPruneServerArgs(RobolabServerArgs):
     specprune: bool = True
     specprune_backend: Literal["eager", "compile", "graph"] = "eager"
+    specprune_local_k: int = 32
+    specprune_global_k: int = 40
+    specprune_min_observation_tokens: int = 60
+    specprune_keep_ratio: float = 0.9
 
 
 class SpecPrunePolicyService(RobolabPolicyService):
@@ -25,6 +30,10 @@ class SpecPrunePolicyService(RobolabPolicyService):
         return super()._build_setup_args(args).model_copy(update={"use_torch_compile": False, "use_cuda_graphs": False})
 
     def __init__(self, args):
+        if not (1 <= args.specprune_local_k <= 170 and 0 <= args.specprune_global_k <= 340
+                and 1 <= args.specprune_min_observation_tokens <= 340
+                and 0 < args.specprune_keep_ratio <= 1):
+            raise ValueError('Invalid SpecPrune budget')
         if args.specprune and (args.num_steps, args.shift, args.guidance) != (4, 5, 3):
             raise ValueError("Frozen SpecPrune requires 4 steps, shift5, guidance3")
         if args.hidden_state_capture_dir or args.rope_qk_capture_dir or args.block_residual_capture_dir:
@@ -33,7 +42,10 @@ class SpecPrunePolicyService(RobolabPolicyService):
         layers = None
         if args.specprune and args.specprune_backend != "eager":
             layers = compile_exit_layers(self.model, cuda_graphs=args.specprune_backend == "graph")
-        self.adapter = SpecPruneObservationExit(self.model, compiled_layers=layers)
+        config = ExitConfig(local_k=args.specprune_local_k, global_k=args.specprune_global_k,
+                            min_observation_tokens=args.specprune_min_observation_tokens,
+                            keep_ratio=args.specprune_keep_ratio)
+        self.adapter = SpecPruneObservationExit(self.model, config=config, compiled_layers=layers)
         self.prompt = None
         self.request_chunk = 0
         if args.specprune:
