@@ -27,6 +27,25 @@ def save(path, value):
     path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
 
 
+def restore_capture(path):
+    record = torch.load(path, map_location="cpu", weights_only=False)
+    batch = record["args"][0]
+    if batch.get("is_preprocessed"):
+        def move(value):
+            if torch.is_tensor(value):
+                return value.cuda()
+            if isinstance(value, dict):
+                return {key: move(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [move(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(move(item) for item in value)
+            return value
+
+        record["args"][0] = move(batch)
+    return record
+
+
 def cost(rows, uc, uu, *, sparse):
     # Same logical matmul boundary as the other Edge baselines. MAC=2 FLOPs.
     d, q, kv, intermediate = 2048, 2048, 1024, 9216
@@ -52,12 +71,20 @@ def cost(rows, uc, uu, *, sparse):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--capture", type=Path, required=True)
+    ap.add_argument(
+        "--history-capture",
+        type=Path,
+        action="append",
+        default=[],
+        help="Earlier real request capture used to build SpecPrune history; repeat in chronological order.",
+    )
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--vae", required=True)
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--warmups", type=int, default=5)
     ap.add_argument("--repeats", type=int, default=20)
     ap.add_argument("--eager-only", action="store_true")
+    ap.add_argument("--history-only", action="store_true", help="Benchmark Dense and history-backed modes only.")
     args = ap.parse_args()
     if args.warmups < 5 or args.repeats < 1:
         ap.error("Need >=5 warmups and >=1 repeats")
@@ -86,7 +113,51 @@ def main():
         )
     )
     model = service.model
-    record = torch.load(args.capture, map_location="cpu", weights_only=False)
+    print(
+        "CUDNN_AUDIT",
+        {
+            "available": torch.backends.cudnn.is_available(),
+            "enabled": torch.backends.cudnn.enabled,
+            "version": torch.backends.cudnn.version(),
+            "benchmark": torch.backends.cudnn.benchmark,
+            "deterministic": torch.backends.cudnn.deterministic,
+        },
+        flush=True,
+    )
+    first_vae_conv = model.tokenizer_vision_gen.model.model.encoder.conv1
+    print(
+        "VAE_CONV_AUDIT",
+        {
+            "weight_shape": tuple(first_vae_conv.weight.shape),
+            "weight_stride": first_vae_conv.weight.stride(),
+            "weight_device": str(first_vae_conv.weight.device),
+            "weight_dtype": str(first_vae_conv.weight.dtype),
+            "groups": first_vae_conv.groups,
+            "stride": first_vae_conv.stride,
+            "dilation": first_vae_conv.dilation,
+        },
+        flush=True,
+    )
+    def _vae_input_audit(module, positional):
+        value = positional[0]
+        print(
+            "VAE_INPUT_AUDIT",
+            {
+                "shape": tuple(value.shape),
+                "stride": value.stride(),
+                "contiguous": value.is_contiguous(),
+                "device": str(value.device),
+                "dtype": str(value.dtype),
+            },
+            flush=True,
+        )
+        _vae_audit_handle.remove()
+
+    _vae_audit_handle = first_vae_conv.register_forward_pre_hook(_vae_input_audit)
+    # Captures made at the model boundary contain already-transformed tensors.
+    # Restore them to CUDA; mapping them to CPU while keeping
+    # ``is_preprocessed=True`` bypasses the normal device transfer.
+    record = restore_capture(args.capture)
     kwargs = {k: record["kwargs"][k] for k in ("seed", "num_steps", "shift", "guidance")}
     assert (kwargs["num_steps"], kwargs["shift"], kwargs["guidance"]) == (4, 5, 3)
     layers = model.net.language_model.model.layers
@@ -119,14 +190,25 @@ def main():
         assert all(
             full[k][0].shape == dense[k][0].shape and torch.equal(full[k][0], dense[k][0]) for k in ("action", "vision")
         )
-        # Identical fixed input twice builds controlled history, NOT real previous c1/c2 observations.
+        # Build either a real chronological history supplied by the caller or
+        # retain the original identical-input microbenchmark for compatibility.
         eager.reset()
-        for i in range(2):
-            eager.generate(copy.deepcopy(record["args"][0]), **kwargs)
+        history_records = [
+            restore_capture(path) for path in args.history_capture
+        ]
+        if history_records:
+            for previous in history_records:
+                previous_kwargs = {
+                    key: previous["kwargs"][key] for key in ("seed", "num_steps", "shift", "guidance")
+                }
+                eager.generate(copy.deepcopy(previous["args"][0]), **previous_kwargs)
+        else:
+            for i in range(2):
+                eager.generate(copy.deepcopy(record["args"][0]), **kwargs)
         history = copy.deepcopy({k: getattr(eager.plan, k) for k in ("previous_rgb", "previous_global", "confidence")})
-        modes = ["dense", "first_eager", "history_eager"]
+        modes = ["dense", "history_eager"] if args.history_only else ["dense", "first_eager", "history_eager"]
         if compiled is not None:
-            modes += ["first_graph", "history_graph"]
+            modes += ["history_graph"] if args.history_only else ["first_graph", "history_graph"]
         last, refs, timings, token_rows = {}, {}, [], {}
 
         def run(mode, seed_delta=0):
@@ -143,7 +225,7 @@ def main():
                 if mode.startswith("history"):
                     for k, v in copy.deepcopy(history).items():
                         setattr(adapter.plan, k, v)
-                    adapter.chunk = 2
+                    adapter.chunk = len(history_records) if history_records else 2
             torch.cuda.synchronize()
             start = time.perf_counter()
             result = (model.generate_samples_from_batch if adapter is None else adapter.generate)(batch, **kw)
@@ -221,7 +303,12 @@ def main():
             input_sha256=hashlib.sha256(args.capture.read_bytes()).hexdigest(),
             last_controller=last,
             boundary=__doc__,
-            history="two identical recorded observations; reset frozen history before every measurement",
+            history=(
+                "chronological real request captures; reset frozen history before every measurement: "
+                + ", ".join(str(path.resolve()) for path in args.history_capture)
+                if history_records
+                else "two identical recorded observations; reset frozen history before every measurement"
+            ),
             source_sha256={str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
             flops_scope="Logical decoder Q/K/V/O, QK/AV, MLP + explicit scoring QK/AV; excludes VAE, heads, redundant _view input projections, norms, softmax, indexing, transfers, UniPC. Not full-pipeline FLOPs.",
             compiler="Non-capture layers only; fullgraph/dynamic/reduce-overhead; eager selection and 7 capture layers retained",
