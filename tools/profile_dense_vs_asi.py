@@ -42,7 +42,7 @@ def main():
             p.error("--reference-eager applies only to ASI")
         old_eager = torch.load(args.reference_eager, map_location="cpu", weights_only=False)["eager"]
     expected = Path(
-        "/root/robolab/cosmos-framework-edge" if args.mode == "dense" else "/root/robolab/worktrees/asi-system-ablation"
+        "/root/robolab/cosmos-framework-edge" if args.mode == "dense" else "/root/robolab/cosmos-framework-edge-core80-stable104-action-weighted"
     )
     source = Path(server.__file__).resolve()
     assert source.is_relative_to(expected), (source, expected)

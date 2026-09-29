@@ -250,7 +250,7 @@ def main():
     p.add_argument('--adapted',action='store_true')
     args=p.parse_args(); args.output=args.output.resolve()
     if args.adapted:
-        TREES.update(toca=ROOT/'worktrees/toca-compile-graph', worldcache=ROOT/'worktrees/worldcache-compile-graph')
+        TREES.update(toca=ROOT/'worktrees/toca-future', worldcache=ROOT/'worktrees/worldcache')
     if args.worker: return worker(args)
     args.output.mkdir(parents=True, exist_ok=False)
     for mode in args.modes:
