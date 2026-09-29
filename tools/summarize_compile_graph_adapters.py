@@ -111,8 +111,8 @@ ToCa/WorldCache另保存seed+1的graph-vs-eager误差。
 - WorldCache：20项CPU测试；旧hook与新output接口、真实denoise旁路、padding历史、缓存clone、CFG/UniPC。
 - 两个分支均完成两轮独立agent review；统一benchmark也经独立review。
 - 原ToCa `f7cf5d6`、WorldCache `763b6d1` worktree未改变。
-- 新分支`experiment/toca-compile-graph`：`/root/robolab/worktrees/toca-compile-graph`。
-- 新分支`experiment/worldcache-compile-graph`：`/root/robolab/worktrees/worldcache-compile-graph`。
+- 保留分支`experiment/toca-future`：`/root/robolab/worktrees/toca-future`。
+- 保留分支`experiment/worldcache`：`/root/robolab/worktrees/worldcache`。
 - 未merge、commit或push；修改留在独立worktree供检查。ASI/C3ache生产代码未改。
 
 ## 数据与复现
@@ -123,7 +123,7 @@ ToCa/WorldCache另保存seed+1的graph-vs-eager误差。
 `comparison.csv`/`comparison.json`为小型汇总，逐策略日志保留。
 
 ```bash
-cd /root/robolab/worktrees/toca-compile-graph
+cd /root/robolab/worktrees/toca-future
 /root/robolab/cosmos-framework-edge-core80-stable104-action-weighted/.venv/bin/python \\
   tools/benchmark_cache_compile_graph.py --adapted \\
   --modes asi toca worldcache c3ache --warmups 5 --repeats 15 \\
