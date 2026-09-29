@@ -1,4 +1,5 @@
 from dataclasses import replace
+import copy
 from types import SimpleNamespace
 
 import pytest
@@ -78,6 +79,91 @@ def test_config_and_counts():
     for options in ({"full_steps": (1, 2)}, {"full_steps": (0, 0)}, {"fresh_ratio": -1}, {"period": 0}):
         with pytest.raises(ValueError):
             toca.ToCaFutureConfig(**options)
+
+
+@pytest.mark.parametrize("ratio", [0.0, 0.25, 1.0])
+@pytest.mark.parametrize("padded", [False, True])
+def test_tensor_cache_matches_original_and_does_not_mutate(ratio, padded, monkeypatch):
+    from cosmos_framework.inference import toca_compiled
+    monkeypatch.setattr(toca, "attention", reference_attention)
+    monkeypatch.setattr(toca_compiled, "attention", reference_attention)
+    torch.manual_seed(12)
+    c = controller(toca.ToCaFutureConfig(fresh_ratio=ratio, layer_slope=0,
+                                        attention_backend="joint", cfg_selection="independent"))
+    x = torch.randn(21, 8)
+    c._init_positions(x)
+    c.current = (1, "conditional")
+    c.cache["conditional", 0] = {"attn": torch.randn(16, 8), "mlp": torch.randn(16, 8)}
+    c.scores["conditional", 0] = torch.randn(16).abs()
+    c.ages["conditional", 0] = torch.zeros(16)
+    adapter = copy.deepcopy(c)
+    memory = SimpleNamespace(und_k_cached=torch.randn(1, 3, 2, 2), und_v_cached=torch.randn(1, 3, 2, 2))
+    angle = torch.arange(21).float()[:, None].repeat(1, 2)
+    expected, count = c._cached(0, pack(x), (pack(angle.cos()), pack(angle.sin())), memory, True)
+    p, co, si = pack(x), pack(angle.cos()), pack(angle.sin())
+    if padded:
+        for item in (p, co, si):
+            item["full_only_seq"] = torch.cat((item["full_only_seq"], torch.full((7, item["full_only_seq"].shape[-1]),999.)))
+    old = {k:v.clone() for k,v in adapter.cache["conditional",0].items()}
+    got, actual_count = adapter._cached_optimized(0, p, (co,si), memory, True)
+    assert actual_count == count
+    torch.testing.assert_close(get_gen_seq(got[0])[:21], get_gen_seq(expected[0]), rtol=0, atol=0)
+    torch.testing.assert_close(adapter.cache["conditional",0]["attn"], old["attn"], rtol=0, atol=0)
+    torch.testing.assert_close(adapter.cache["conditional",0]["mlp"], c.cache["conditional",0]["mlp"], rtol=0, atol=0)
+    assert torch.equal(adapter.indices[1,"conditional",0],c.indices[1,"conditional",0])
+
+
+def test_full_joint_padding_excludes_all_fake_rows(monkeypatch):
+    from cosmos_framework.inference import toca_compiled, toca_joint_attention
+    seen = {}
+    def joint(q,ku,kg,vu,vg,future,scale):
+        seen.update(nq=len(q), nu=len(ku), kg=len(kg), vg=len(vg), future=future.clone())
+        return q.clone(), torch.ones(len(future))
+    def causal(**kwargs):
+        assert kwargs["query"].shape[1] == kwargs["key"].shape[1] == 3
+        return kwargs["query"]
+    monkeypatch.setattr(toca_joint_attention,"joint_attention_score",joint)
+    monkeypatch.setattr(toca_compiled,"attention",causal)
+    def make(h):
+        p=pack(torch.randn(21,h,2))
+        p["_num_causal_tokens"]=3
+        p["causal_seq"]=torch.randn(8,h,2)
+        p["full_only_seq"]=torch.randn(32,h,2)
+        return p
+    q,k,v=make(4),make(2),make(2)
+    out,score=toca_compiled.full_joint_dispatch(q,k,v,None,None,torch.arange(2,18),.7)
+    assert (seen["nq"],seen["nu"],seen["kg"],seen["vg"]) == (21,3,21,21)
+    assert out["causal_seq"].shape == (8,8) and out["full_only_seq"].shape == (32,8)
+    assert not out["causal_seq"][3:].any() and not out["full_only_seq"][21:].any()
+
+
+@pytest.mark.parametrize("und_len", [3, 7])
+def test_joint_und_norm_and_cached_und_mapping(und_len, monkeypatch):
+    from cosmos_framework.inference import toca_compiled, toca_joint_attention
+    observed = {}
+    def joint(q, ku, kg, vu, vg, future, scale):
+        observed["gen_und_k"] = ku.clone()
+        return q.clone(), torch.zeros(len(future))
+    def causal(**kw):
+        observed["und_self_k"] = kw["key"][0].clone()
+        return kw["query"]
+    monkeypatch.setattr(toca_joint_attention, "joint_attention_score", joint)
+    monkeypatch.setattr(toca_compiled, "attention", causal)
+    q, k, v, kn = (pack(torch.randn(21,h,2)) for h in (4,2,2,2))
+    for item, h in ((q,4),(k,2),(v,2),(kn,2)):
+        item["_num_causal_tokens"] = und_len
+        item["causal_seq"] = torch.randn(8,h,2)
+    toca_compiled.full_joint_dispatch(q,k,v,kn,None,torch.arange(2,18),.7)
+    torch.testing.assert_close(observed["gen_und_k"],kn["causal_seq"][:und_len])
+    torch.testing.assert_close(observed["und_self_k"],k["causal_seq"][:und_len])
+    memory = SimpleNamespace(und_k_cached=torch.randn(1,und_len,2,2), und_v_cached=torch.randn(1,und_len,2,2))
+    with pytest.raises(RuntimeError,match="GEN-only"):
+        toca_compiled.full_joint_dispatch(q,k,v,kn,memory,torch.arange(2,18),.7)
+    q["causal_seq"] = q["causal_seq"][:0]
+    observed.clear()
+    toca_compiled.full_joint_dispatch(q,k,v,kn,memory,torch.arange(2,18),.7)
+    torch.testing.assert_close(observed["gen_und_k"],memory.und_k_cached[0])
+    assert "und_self_k" not in observed
 
 
 def test_scan_grid_and_task_counts():

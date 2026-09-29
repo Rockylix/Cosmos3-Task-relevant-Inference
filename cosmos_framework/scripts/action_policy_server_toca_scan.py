@@ -8,6 +8,7 @@ import json
 import time
 from contextlib import nullcontext
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -28,9 +29,16 @@ class ScanArgs(RobolabServerArgs):
     scan_config: Path
     scan_output: Path
     scan_capture_root: Path | None = None
+    toca_execution: Literal["eager", "compile", "compile-graph"] = "eager"
 
 
 class ScanService(EagerService):
+    def _build_setup_args(self, args):
+        return super()._build_setup_args(args).model_copy(update={
+            "use_torch_compile": args.toca_execution != "eager",
+            "use_cuda_graphs": args.toca_execution == "compile-graph",
+        })
+
     def __init__(self, args):
         if (args.num_steps, args.guidance, args.shift, args.format_prompt_as_json) != (4, 3, 5, True):
             raise ValueError("Scan requires 4 steps, guidance=3, shift=5, structured prompt")
@@ -40,6 +48,12 @@ class ScanService(EagerService):
         self.scan_config = None
         if values is not None:
             self.scan_config = ToCaFutureConfig(**{**values, "full_steps": tuple(values["full_steps"])})
+        if args.toca_execution != "eager":
+            if self.scan_config is None or self.scan_config.attention_backend != "joint":
+                raise ValueError("Compiled ToCa requires a non-Dense joint-backend config")
+            if args.eager or any(x is not None for x in (args.hidden_state_capture_dir,
+                    args.block_residual_capture_dir, args.rope_qk_capture_dir, args.scan_capture_root)):
+                raise ValueError("Compiled ToCa cannot use --eager or eager capture hooks")
         self.scan_output = args.scan_output.resolve()
         self.scan_output.mkdir(parents=True, exist_ok=True)
         if (self.scan_output / "requests.jsonl").exists():
@@ -57,8 +71,8 @@ class ScanService(EagerService):
             self.scan_output / "runtime.json",
             {
                 **settings,
-                "compile": False,
-                "cuda_graphs": False,
+                "compile": args.toca_execution != "eager",
+                "cuda_graphs": args.toca_execution == "compile-graph",
                 "seed": args.seed,
                 "reset_rng_each_task": True,
                 "deterministic_seed": args.deterministic_seed,
@@ -73,7 +87,9 @@ class ScanService(EagerService):
             torch.cuda.synchronize()
             start = time.perf_counter()
             controller = (
-                ToCaFutureController(self.model.net, self.scan_config) if self.scan_config is not None else None
+                ToCaFutureController(self.model.net, self.scan_config,
+                    optimized=args.toca_execution != "eager", use_compile=args.toca_execution != "eager",
+                    cuda_graphs=args.toca_execution == "compile-graph") if self.scan_config is not None else None
             )
             with controller if controller is not None else nullcontext():
                 samples = original(*positional, **kwargs)

@@ -598,6 +598,7 @@ class PackedAttentionMoT(nn.Module):
         packed_position_embeddings: tuple[SequencePack, SequencePack],
         natten_metadata: dict | None = None,
         memory_value: MemoryValue | None = None,
+        toca_future_positions: torch.Tensor | None = None,
     ) -> tuple[SequencePack, KVToStore | None]:
         """Forward pass with optional memory-augmented attention.
 
@@ -750,15 +751,25 @@ class PackedAttentionMoT(nn.Module):
                 "scaling": self.scaling,
             }
 
-        packed_attn_output, kv_to_store = self.dispatch_attention_fn(
-            packed_query_states_,
-            packed_key_states_,
-            packed_value_states_,
-            attention_mask,
-            natten_metadata=natten_metadata,
-            memory_value=memory_value,
-            packed_key_states_normalized=packed_key_states_normalized_,
-        )
+        toca_score = None
+        if toca_future_positions is not None:
+            from cosmos_framework.inference.toca_compiled import full_joint_dispatch
+
+            packed_attn_output, toca_score = full_joint_dispatch(
+                packed_query_states_, packed_key_states_, packed_value_states_,
+                packed_key_states_normalized_, memory_value, toca_future_positions, self.scaling,
+            )
+            kv_to_store = None
+        else:
+            packed_attn_output, kv_to_store = self.dispatch_attention_fn(
+                packed_query_states_,
+                packed_key_states_,
+                packed_value_states_,
+                attention_mask,
+                natten_metadata=natten_metadata,
+                memory_value=memory_value,
+                packed_key_states_normalized=packed_key_states_normalized_,
+            )
         if attention_stats_inputs is not None:
             actual_gen_attn_output = get_gen_seq(packed_attn_output)[:num_gen_tokens].reshape(
                 -1, self.num_attention_heads, self.head_dim
@@ -824,7 +835,10 @@ class PackedAttentionMoT(nn.Module):
         else:
             und_seq = self.o_proj(get_und_seq(packed_attn_output))  # [N_und,hidden_size]
             gen_seq = self.o_proj_moe_gen(get_gen_seq(packed_attn_output))  # [N_gen,hidden_size]
-        return from_und_gen_splits(und_seq, gen_seq, pack), kv_to_store  # [N_und+N_gen,hidden_size]
+        result = from_und_gen_splits(und_seq, gen_seq, pack)
+        if toca_future_positions is not None:
+            return result, kv_to_store, toca_score
+        return result, kv_to_store  # [N_und+N_gen,hidden_size]
 
     def reasoner_forward(
         self,
@@ -1047,6 +1061,11 @@ def _impl_forward(
                     memory_value=memory_value,
                     gen_only=memory_gen_only,
                 )
+            elif (toca := getattr(self, "_toca_future_controller", None)) is not None and toca.optimized and toca.current is not None:
+                hidden_states, lbl_metadata_dict, kv_to_store = toca.run_layer(
+                    i, decoder_layer, hidden_states, attention_mask, position_embeddings,
+                    None if natten_metadata_list is None else natten_metadata_list[i], memory_value, memory_gen_only,
+                )
             else:
                 hidden_states, lbl_metadata_dict, kv_to_store = decoder_layer(
                     hidden_states,
@@ -1186,6 +1205,7 @@ class MoTDecoderLayer(nn.Module):
         natten_metadata: dict | None = None,
         memory_value: MemoryValue | None = None,
         gen_only: bool = False,
+        toca_future_positions: torch.Tensor | None = None,
     ) -> tuple[SequencePack, dict[str, LBLMetadata], KVToStore | None]:
         """Forward pass with MoT routing and optional memory-augmented attention.
 
@@ -1238,13 +1258,15 @@ class MoTDecoderLayer(nn.Module):
                 from_und_gen_splits(_empty_sin_und, get_gen_seq(_sin), _sin),
             )
 
-            pack_attn_out, kv_to_store = self.self_attn(
+            attn_result = self.self_attn(
                 gen_pack,
                 attention_mask,
                 gen_position_embeddings,
                 natten_metadata=natten_metadata,
                 memory_value=memory_value,
+                toca_future_positions=toca_future_positions,
             )
+            pack_attn_out, kv_to_store = attn_result[:2]
             gen_attn_out = get_gen_seq(pack_attn_out)
             # No residual_und here: the gen_only MLP branch below builds its own
             # length-0 und sequence for ``mlp_out_und_seq``; carrying one through
@@ -1252,13 +1274,15 @@ class MoTDecoderLayer(nn.Module):
             residual_gen = get_gen_seq(input) + gen_attn_out
         else:
             # STANDARD PATH: Process both und and gen tokens
-            pack_attn_out, kv_to_store = self.self_attn(
+            attn_result = self.self_attn(
                 pack_norm_out,
                 attention_mask,
                 packed_position_embeddings,
                 natten_metadata=natten_metadata,
                 memory_value=memory_value,
+                toca_future_positions=toca_future_positions,
             )
+            pack_attn_out, kv_to_store = attn_result[:2]
             residual_und = get_und_seq(input) + get_und_seq(pack_attn_out)  # [N_und,hidden_size]
             residual_gen = get_gen_seq(input) + get_gen_seq(pack_attn_out)  # [N_gen,hidden_size]
 
@@ -1318,6 +1342,11 @@ class MoTDecoderLayer(nn.Module):
             mlp_out_und_seq = residual_und + mlp_out_und  # [N_und,hidden_size]
             mlp_out_gen_seq = residual_gen + mlp_out_gen  # [N_gen,hidden_size]
 
+        if toca_future_positions is not None:
+            lbl_metadata_dict["toca_cache"] = (
+                get_gen_seq(pack_attn_out).index_select(0, toca_future_positions),
+                mlp_out_gen.index_select(0, toca_future_positions), attn_result[2],
+            )
         return from_und_gen_splits(mlp_out_und_seq, mlp_out_gen_seq, input), lbl_metadata_dict, kv_to_store
 
     def reasoner_forward(

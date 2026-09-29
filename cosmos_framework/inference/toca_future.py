@@ -111,11 +111,19 @@ def apply_selected_rope(module, query, key, cos, sin, protected):
 class ToCaFutureController:
     """Temporarily route decoder forwards, leaving the disabled path untouched."""
 
-    def __init__(self, net, config: ToCaFutureConfig | None = None, *, num_steps=4, guidance=3.0):
+    def __init__(self, net, config: ToCaFutureConfig | None = None, *, num_steps=4, guidance=3.0,
+                 optimized=False, use_compile=False, cuda_graphs=False):
         if num_steps != 4 or guidance != 3.0:
             raise ValueError("This experiment requires four steps and CFG=3")
         self.net = net
         self.config = config or ToCaFutureConfig()
+        self.optimized, self.use_compile, self.cuda_graphs = optimized, use_compile, cuda_graphs
+        if (use_compile or cuda_graphs) and not optimized:
+            raise ValueError("Compile/Graph requires optimized ToCa execution")
+        if optimized and self.config.attention_backend != "joint":
+            raise ValueError("Compiled-compatible ToCa currently requires the frozen joint backend")
+        if cuda_graphs and not use_compile:
+            raise ValueError("CUDA Graph requires compile")
         self.model = net.language_model.model
         self.layers = list(self.model.layers)
         if len(self.layers) != 28:
@@ -155,10 +163,11 @@ class ToCaFutureController:
         self.model._toca_future_controller = self
         self._handles.append(self.net.register_forward_pre_hook(self._pre, with_kwargs=True))
         self._handles.append(self.net.register_forward_hook(self._post, with_kwargs=True, always_call=True))
-        for block, layer in enumerate(self.layers):
-            original = layer.forward
-            self._originals.append((layer, "forward" in layer.__dict__, original))
-            layer.forward = partial(self._forward, block, original)
+        if not self.optimized:
+            for block, layer in enumerate(self.layers):
+                original = layer.forward
+                self._originals.append((layer, "forward" in layer.__dict__, original))
+                layer.forward = partial(self._forward, block, original)
         return self
 
     def __exit__(self, *exc):
@@ -232,21 +241,25 @@ class ToCaFutureController:
         if natten_metadata is not None or input.get("is_sharded", False):
             raise RuntimeError("ToCa smoke supports single-GPU full attention only")
         x = get_gen_seq(input)
-        if len(x) != input["_num_full_tokens"]:
+        if not self.optimized and len(x) != input["_num_full_tokens"]:
             raise RuntimeError("ToCa eager reference does not support padded GEN rows")
+        if self.optimized:
+            x = x[:input["_num_full_tokens"]]
         self._init_positions(x)
         step, branch = self.current
         if step in self.config.full_steps:
-            result = self._full(
+            full = self._full_optimized if self.optimized else self._full
+            result = full(
                 block, original, input, attention_mask, packed_position_embeddings, memory_value, gen_only
             )
             fresh = len(self.future)
             kind = "full"
         else:
-            result, fresh = self._cached(block, input, packed_position_embeddings, memory_value, gen_only)
+            cached = self._cached_optimized if self.optimized else self._cached
+            result, fresh = cached(block, input, packed_position_embeddings, memory_value, gen_only)
             kind = "cached"
         self._block_sequence.append(block)
-        self.finite.append(torch.isfinite(get_gen_seq(result[0])).all())
+        self.finite.append(torch.isfinite(get_gen_seq(result[0])[:len(x)]).all())
         self.records.append(
             {
                 "step": step,
@@ -264,6 +277,53 @@ class ToCaFutureController:
             }
         )
         return result
+
+    def run_layer(self, block, decoder, input, mask, rope, natten, memory, gen_only):
+        return self._forward(block, decoder, input, mask, rope, natten, memory, gen_only)
+
+    def _full_optimized(self, block, decoder, input, mask, rope, memory, gen_only):
+        # All cache values are outputs of this compiled call, never side-effect hooks.
+        if getattr(mask, "is_three_way", False) or getattr(mask, "control_stream_token_ranges", None) is not None:
+            raise RuntimeError("Compiled ToCa supports full single-sample GEN attention only")
+        if input["sample_offsets"].numel() != 2:
+            raise RuntimeError("Compiled ToCa requires batch=1")
+        output, metadata, kv = decoder(input, mask, rope, memory_value=memory, gen_only=gen_only,
+                                       toca_future_positions=self.future)
+        a, m, score = metadata.pop("toca_cache")
+        branch = self.current[1]
+        self.cache[branch, block] = {"attn": a.detach().clone(), "mlp": m.detach().clone()}
+        self.scores[branch, block] = score.detach().clone()
+        if self.config.cfg_selection == "independent" or branch == "unconditional":
+            key = (branch, block) if self.config.cfg_selection == "independent" else block
+            self.ages[key] = torch.zeros(len(self.future), device=self.future.device, dtype=torch.float32)
+        return output, metadata, kv
+
+    def _cached_optimized(self, block, pack, rope, memory, gen_only):
+        from cosmos_framework.inference.toca_compiled import cached_forward
+
+        if not gen_only or memory is None or memory.und_k_cached is None:
+            raise RuntimeError("Cached steps require native request-local UND cache")
+        indices = self._select_indices(block)
+        entry = self.cache[self.current[1], block]
+        layer = getattr(self.layers[block], "_orig_mod", self.layers[block])
+        # Reuse compiled code only, never request data or caches.
+        runtime = getattr(self.net, "_toca_compiled_runtime", None)
+        if runtime is None:
+            runtime = self.net._toca_compiled_runtime = {}
+        key = (self.use_compile, self.cuda_graphs)
+        if key not in runtime:
+            runtime[key] = (torch.compile(cached_forward, fullgraph=True, dynamic=True,
+                mode="reduce-overhead" if self.cuda_graphs else "default") if self.use_compile else cached_forward)
+        x = get_gen_seq(pack)
+        n = pack["_num_full_tokens"]
+        out, mlp, metadata = runtime[key](layer, x[:n], get_gen_seq(rope[0])[:n], get_gen_seq(rope[1])[:n],
+            memory.und_k_cached, memory.und_v_cached, self.future, self.protected, indices,
+            entry["attn"], entry["mlp"])
+        entry["mlp"] = mlp.detach().clone()
+        # Restore the storage shape, not extra attention keys. Padding is never cached.
+        out = torch.cat((out, x[n:]), dim=0)
+        packed = from_und_gen_splits(out.new_empty(0, out.shape[-1]), out, pack)
+        return (packed, {"gen": metadata} if metadata is not None else {}, None), len(indices)
 
     def _full(self, block, original, input, mask, rope, memory, gen_only):
         layer = self.layers[block]
