@@ -23,6 +23,7 @@ class WorldCacheConfig:
     n_max: int = 6
     eps: float = 1e-8
     check_finite: bool = True
+    compile_compatible: bool = False
 
     def __post_init__(self) -> None:
         if not 0 <= self.percentile_stable < self.percentile_chaotic <= 1:
@@ -207,6 +208,7 @@ class WorldCacheRequest:
         patch_size: int,
         action_dim: int | None,
         vision_projection: Any | None = None,
+        projection_from_output: bool = False,
     ) -> dict[str, Any]:
         if self.step < 0 or branch not in self.branches or branch in self.seen:
             raise RuntimeError("Invalid WorldCache step/branch call order")
@@ -231,7 +233,7 @@ class WorldCacheRequest:
             if mode == "FULL":
                 projected = []
                 hook = None
-                if vision_projection is not None:
+                if vision_projection is not None and not projection_from_output:
                     hook = vision_projection.register_forward_hook(
                         lambda module, inputs, output: projected.append(output.detach())
                     )
@@ -240,6 +242,10 @@ class WorldCacheRequest:
                 finally:
                     if hook is not None:
                         hook.remove()
+                if projection_from_output:
+                    # Returned by the compiled head; never recover padded patches
+                    # from cropped pixels and never hold a replay-owned buffer.
+                    projected.append(result.pop("_worldcache_projection").detach())
                 if vision_projection is not None and len(projected) != 1:
                     raise RuntimeError(f"Expected one native vision projection, got {len(projected)}")
                 tokens = state.layout.encode(result, projected[0] if projected else None)

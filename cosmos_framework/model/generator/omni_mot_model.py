@@ -2241,14 +2241,23 @@ class OmniMoTModel(ImaginaireModel):
         else:
             target_net = net if net is not None else self.net
             raw_dims = gen_data_clean.raw_action_dim
-            out = worldcache_request.evaluate(
-                branch=worldcache_branch,
-                compute=lambda: self.denoise(net=net, data_batch_packed=packed_sequence, memory=memory),
-                packed=packed_sequence,
-                patch_size=int(target_net.latent_patch_size),
-                action_dim=raw_dims[0] if raw_dims is not None else None,
-                vision_projection=target_net.llm2vae,
-            )
+            projection_from_output = worldcache_request.config.compile_compatible
+            previous_projection_mode = getattr(target_net, "_worldcache_return_projection", False)
+            if projection_from_output:
+                target_net._worldcache_return_projection = True
+            try:
+                out = worldcache_request.evaluate(
+                    branch=worldcache_branch,
+                    compute=lambda: self.denoise(net=net, data_batch_packed=packed_sequence, memory=memory),
+                    packed=packed_sequence,
+                    patch_size=int(target_net.latent_patch_size),
+                    action_dim=raw_dims[0] if raw_dims is not None else None,
+                    vision_projection=target_net.llm2vae,
+                    projection_from_output=projection_from_output,
+                )
+            finally:
+                if projection_from_output:
+                    target_net._worldcache_return_projection = previous_projection_mode
 
         # --- Apply velocity masks ---
         # Zero out velocity for conditioned parts (they don't change during sampling)
@@ -2586,8 +2595,8 @@ class OmniMoTModel(ImaginaireModel):
                 raise ValueError("WorldCache D/D/D/C requires the native UniPCSampler")
             if dist.is_initialized() and dist.get_world_size() != 1:
                 raise ValueError("WorldCache minimal adapter supports single-rank inference only")
-            if self.config.compile.enabled or self.config.compile.use_cuda_graphs:
-                raise ValueError("WorldCache first version requires eager inference, no compile/CUDA graphs")
+            if (self.config.compile.enabled or self.config.compile.use_cuda_graphs) and not worldcache_config.compile_compatible:
+                raise ValueError("Compiled WorldCache requires compile_compatible projection-output capture")
             self._last_worldcache_report = None
             worldcache_request = WorldCacheRequest(worldcache_config)
 
@@ -4346,6 +4355,8 @@ class OmniMoTModel(ImaginaireModel):
         )
         output_dict = dict()
         output_dict["preds_vision"] = out_net["preds_vision"]
+        if "_worldcache_projection" in out_net:
+            output_dict["_worldcache_projection"] = out_net["_worldcache_projection"]
         if self.config.action_gen and "preds_action" in out_net:
             output_dict["preds_action"] = out_net["preds_action"]
         if self.config.sound_gen and "preds_sound" in out_net:

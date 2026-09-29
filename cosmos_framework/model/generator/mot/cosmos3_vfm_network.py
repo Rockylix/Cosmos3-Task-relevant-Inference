@@ -678,6 +678,8 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             preds_vision = self.llm2vae(
                 last_hidden_state[vision.mse_loss_indexes]
             )  # [total_noisy_vision_patches,patch_latent_dim]
+            if getattr(self, "_worldcache_return_projection", False):
+                output_dict["_worldcache_projection"] = preds_vision
             preds_vision = self.unpatchify_and_unpack_latents(
                 preds_vision,
                 token_shapes_vision=vision.token_shapes,

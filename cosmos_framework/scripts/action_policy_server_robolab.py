@@ -386,7 +386,9 @@ class RobolabServerArgs(pydantic.BaseModel):
     eager: bool = False
     """Disable torch.compile and CUDA graphs (also useful for paired Dense measurements)."""
     worldcache_dddc: bool = False
-    """Experimental joint video/action WorldCache: three FULL steps, then one CACHE step. Forces eager."""
+    """Experimental joint video/action WorldCache: three FULL steps, then one CACHE step."""
+    worldcache_execution: Literal["eager", "compile", "compile-graph"] = "eager"
+    """Execution backend; eager remains the default."""
     worldcache_stable_percentile: float = 0.30
     """Stable curvature quantile over generated video + action tokens."""
     worldcache_chaotic_percentile: float = 0.70
@@ -481,6 +483,8 @@ class RobolabServerArgs(pydantic.BaseModel):
                 raise ValueError("WorldCache cannot be combined with dense hidden/residual/QK collectors")
             if not self.use_state or self.history_length != 1 or self.action_chunk_size != 32:
                 raise ValueError("WorldCache requires q0 state + 32 generated actions")
+        if self.worldcache_execution != "eager" and (not self.worldcache_dddc or self.eager):
+            raise ValueError("Compiled WorldCache requires --worldcache-dddc and no --eager")
         return self
 
 
@@ -507,9 +511,10 @@ class RobolabPolicyService:
             from cosmos_framework.inference.worldcache import WorldCacheConfig
 
             self._worldcache_config = WorldCacheConfig(
-                args.worldcache_stable_percentile, args.worldcache_chaotic_percentile, args.worldcache_n_max
+                args.worldcache_stable_percentile, args.worldcache_chaotic_percentile, args.worldcache_n_max,
+                compile_compatible=args.worldcache_execution != "eager",
             )
-            log.info("[worldcache] enabled D/D/D/C joint video/action, eager, request-local FULL history")
+            log.info(f"[worldcache] enabled D/D/D/C joint video/action, {args.worldcache_execution}, request-local FULL history")
         assert isinstance(pipe.setup_args, OmniSetupArgs)
         self.setup_args: OmniSetupArgs = pipe.setup_args
 
@@ -650,6 +655,9 @@ class RobolabPolicyService:
             # Experiment hooks must observe eager transformer/attention calls.
             setup_overrides["use_torch_compile"] = False
             setup_overrides["use_cuda_graphs"] = False
+        if args.worldcache_dddc and args.worldcache_execution != "eager":
+            setup_overrides["use_torch_compile"] = True
+            setup_overrides["use_cuda_graphs"] = args.worldcache_execution == "compile-graph"
         if args.experiment is not None:
             setup_overrides["experiment"] = args.experiment
         if args.experiment_overrides:

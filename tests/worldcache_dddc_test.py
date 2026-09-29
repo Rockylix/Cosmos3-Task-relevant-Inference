@@ -69,6 +69,53 @@ def extracted_velocity_tail():
 
 
 class WorldCacheTests(unittest.TestCase):
+    def test_actual_denoise_preserves_projection_side_output(self):
+        tree = ast.parse((ROOT / "cosmos_framework/model/generator/omni_mot_model.py").read_text())
+        method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "denoise")
+        method = copy.deepcopy(method)
+        method.decorator_list = []
+        method.returns = None
+        for a in method.args.args:
+            a.annotation = None
+        namespace = {}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), "denoise_seam", "exec"), namespace)
+        projection = torch.randn(10, 8)
+        result = dict(preds_vision=[torch.randn(2, 9, 2, 2)], _worldcache_projection=projection)
+        model = NS(net=lambda **kwargs: result, config=NS(action_gen=False, sound_gen=False))
+        out = namespace["denoise"](model)
+        self.assertIs(out["_worldcache_projection"], projection)
+
+    def test_projection_output_matches_hook_and_owns_history(self):
+        p = packed_fixture(height=33, width=40)
+        requests = [WorldCacheRequest(WorldCacheConfig()),
+                    WorldCacheRequest(WorldCacheConfig(compile_compatible=True))]
+        projection = torch.nn.Identity()
+        buffer = torch.randn(8 * 17 * 20, 8)
+        for step in range(4):
+            for req in requests:
+                req.begin_step()
+            for branch in ("conditional", "unconditional"):
+                results = []
+                for use_output, req in enumerate(requests):
+                    out = prediction(p, step, branch)
+                    def compute():
+                        if use_output:
+                            out["_worldcache_projection"] = buffer
+                        else:
+                            projection(buffer)
+                        return out
+                    results.append(req.evaluate(branch, compute, p, 2, 4, projection,
+                                                projection_from_output=bool(use_output)))
+                    self.assertNotIn("_worldcache_projection", results[-1])
+                    self.assertFalse(projection._forward_hooks)
+                for key in ("preds_vision", "preds_action"):
+                    torch.testing.assert_close(results[0][key][0], results[1][key][0], rtol=0, atol=0)
+            if step < 3:
+                old = requests[1].histories["conditional"].outputs[-1]["vision"].clone()
+                buffer.add_(1)
+                torch.testing.assert_close(requests[1].histories["conditional"].outputs[-1]["vision"], old,
+                                           rtol=0, atol=0)
+
     def test_patch_grid_and_exact_network_order(self):
         x = torch.arange(3 * 8 * 34 * 40).reshape(3, 8, 34, 40).float()
         y = patchify(x, 2)
