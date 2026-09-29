@@ -47,6 +47,8 @@ def worker(args):
 
     assert Path(cosmos_framework.__path__[0]).resolve() == TREES[args.worker] / "cosmos_framework"
     torch.set_num_threads(4)
+    torch._dynamo.config.recompile_limit = 256
+    torch._dynamo.config.accumulated_recompile_limit = 4096
     out = args.output / args.worker
     out.mkdir(parents=True, exist_ok=False)
 
@@ -77,9 +79,14 @@ def worker(args):
         )
     )
     model, net = service.model, service.model.net
-    capture = torch.load(CAPTURE, map_location="cpu", weights_only=False)
-    assert capture["kwargs"] == dict(guidance=3.0, seed=[1097657232], num_steps=4, shift=5.0)
-    input_hash = hashlib.sha256(CAPTURE.read_bytes()).hexdigest()
+    capture_path = args.capture.resolve()
+    capture = torch.load(capture_path, map_location="cpu", weights_only=False)
+    assert {k: capture["kwargs"][k] for k in ("guidance", "num_steps", "shift")} == {
+        "guidance": 3.0,
+        "num_steps": 4,
+        "shift": 5.0,
+    }
+    input_hash = hashlib.sha256(capture_path.read_bytes()).hexdigest()
     config, cache = None, None
     if args.worker == "asi":
         from cosmos_framework.inference.asi_main_lse import MainLSEController
@@ -205,8 +212,8 @@ def worker(args):
         python=sys.executable,
         torch=torch.__version__,
         gpu=torch.cuda.get_device_name(),
-        input=str(CAPTURE),
-        input_sha256=hashlib.sha256(CAPTURE.read_bytes()).hexdigest(),
+        input=str(capture_path),
+        input_sha256=input_hash,
         kwargs=capture["kwargs"],
         config=config,
         compile_dynamic=cfg.compile_dynamic,
@@ -407,6 +414,7 @@ def worker(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--capture", type=Path, default=CAPTURE)
     p.add_argument("--worker", choices=list(TREES))
     p.add_argument("--modes", nargs="+", default=list(TREES), choices=list(TREES))
     p.add_argument("--warmups", type=int, default=5)
@@ -415,12 +423,12 @@ def main():
     args = p.parse_args()
     args.output = args.output.resolve()
     if args.adapted:
-        TREES.update(toca=ROOT / "worktrees/toca-compile-graph", worldcache=ROOT / "worktrees/worldcache-compile-graph")
+        TREES.update(toca=ROOT / "worktrees/toca-future", worldcache=ROOT / "worktrees/worldcache")
     if args.warmups < 5 or args.repeats < 1:
         p.error("Require >=5 warmups and >=1 formal repeat")
     if args.worker:
         return worker(args)
-    args.output.mkdir(parents=True, exist_ok=False)
+    args.output.mkdir(parents=True, exist_ok=args.modes[0] != "dense")
     if args.modes[0] != "dense" and not (args.output / "dense/reference.pt").exists():
         p.error("Run pristine Dense first")
     for mode in args.modes:
@@ -444,6 +452,8 @@ def main():
             mode,
             "--output",
             str(args.output),
+            "--capture",
+            str(args.capture.resolve()),
             "--warmups",
             str(args.warmups),
             "--repeats",
